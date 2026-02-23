@@ -4,27 +4,39 @@
 source .agent/api-env.sh
 
 # GET
-API_TOKEN_NAME=dev-admin curl "$API_BASE/bandar-admin/activities"
+curl "$API_BASE/bandar-admin/activities"
 
 # POST
-API_TOKEN_NAME=dev-admin curl -X POST \
+curl -X POST \
   -H "Content-Type: application/json" \
   -d '{"name": "Test"}' \
   "$API_BASE/bandar-admin/activities"
 
 # PATCH
-API_TOKEN_NAME=dev-admin curl -X PATCH \
+curl -X PATCH \
   -H "Content-Type: application/json" \
   -d '{"status": "inactive"}' \
   "$API_BASE/bandar-admin/activities/{id}"
 
 # DELETE
-API_TOKEN_NAME=dev-admin curl -X DELETE "$API_BASE/bandar-admin/activities/{id}"
+curl -X DELETE "$API_BASE/bandar-admin/activities/{id}"
 ```
 
-## tokens.toml format
+## Config
+
+Copy and edit:
 
 ```toml
-[dev-admin]
-token = "eyJhbGc..."
+# .agent/scripts/config.toml
+active_project = "bandar"
+active_env = "dev"
+default_token = "dev_superuser"
+
+[projects.bandar.envs.dev]
+api_base = "<your-dev-api-base-url>"
+api_mode = "safe-updates"
+openapi_url = "<your-dev-openapi-json-url>"
+
+[projects.bandar.envs.dev.tokens]
+dev_superuser = "<your-jwt-token-here>"
 ```

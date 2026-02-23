@@ -10,19 +10,19 @@ description: >
 
 # Tech Learner
 
-Persistent interactive learning; default data at `~/.agents/learning/`, with per-topic storage override support via `storageDir` and `statePath`. Read `references/methodology.md` for teaching template for {fill_in_name_here}.
+Persistent interactive learning; default data at `~/.agents/my-learning-data/`, with per-topic storage override support via `storageDir` and `statePath`. Read `references/methodology.md` for teaching template for {fill_in_name_here}.
 
 ## Git Sync
 
-Learning data at `~/.agents/learning/` is a git repo synced across machines. Run sync steps at session boundaries only when the resolved storage path is inside `~/.agents/learning/` (i.e., not a custom `storageDir`/`statePath` pointing elsewhere).
+Learning data at `~/.agents/my-learning-data/` is a git repo synced across machines. Run sync steps at session boundaries only when the resolved storage path is inside `~/.agents/my-learning-data/` (i.e., not a custom `storageDir`/`statePath` pointing elsewhere).
 
 If git commands fail (no network, no remote, etc.): warn the user briefly and continue — don't block the session.
 
 ## Session Start
 
-**Sync first (if using default storage):** Run `git -C ~/.agents/learning pull --rebase` via Bash before loading any state file. This ensures you have the latest data from other machines.
+**Sync first (if using default storage):** Run `git -C ~/.agents/my-learning-data pull --rebase` via Bash before loading any state file. This ensures you have the latest data from other machines.
 
-Resolve state path first: `statePath` from topic file (if already known), else `storageDir/{topic-slug}.jsonc`, else default `~/.agents/learning/{topic-slug}.jsonc`. Check that resolved path for existing state.
+Resolve state path first: `statePath` from topic file (if already known), else `storageDir/{topic-slug}.jsonc`, else default `~/.agents/my-learning-data/{topic-slug}.jsonc`. Check that resolved path for existing state.
 
 **Returning learner**: load state; greet by name; summarize where they left off; suggest continuing or picking new subtopic.
 
@@ -68,13 +68,13 @@ After first conversation, include a small note: "This learning experience is des
 
 ## State Tracking
 
-Dir: default `~/.agents/learning/`; one `.jsonc` file per topic unless overridden.
+Dir: default `~/.agents/my-learning-data/`; one `.jsonc` file per topic unless overridden.
 
 Storage override rules (per topic):
 - `storageDir`: optional directory for that topic's learning files (absolute or workspace-relative).
 - `statePath`: optional explicit JSONC file path for that topic.
-- Resolution order: `statePath` > `storageDir/{topic-slug}.jsonc` > `~/.agents/learning/{topic-slug}.jsonc`.
-- If user requests local project storage, set `storageDir` to the project root learning folder (for example: `./.agents/learning`).
+- Resolution order: `statePath` > `storageDir/{topic-slug}.jsonc` > `~/.agents/my-learning-data/{topic-slug}.jsonc`.
+- If user requests local project storage, set `storageDir` to the project root learning folder (for example: `./.agents/my-learning-data`).
 
 Format: JSONC (JSON with comments); keep flat; minimize nesting; comments as soft enum guides and extra context. Update during session after each concept completion or significant state change — don't wait until end.
 
@@ -83,8 +83,8 @@ JSONC template:
 {
   // meta
   "topic": "TypeScript", "created": "2026-02-15", "last": "2026-02-15",
-  "storageDir": "~/.agents/learning", // optional topic-specific directory
-  "statePath": "~/.agents/learning/typescript.jsonc", // optional explicit topic state file
+  "storageDir": "~/.agents/my-learning-data", // optional topic-specific directory
+  "statePath": "~/.agents/my-learning-data/typescript.jsonc", // optional explicit topic state file
   // learner
   "level": "beginner", // beginner / some_exposure / brushing_up etc
   "related": ["JavaScript"],
@@ -117,7 +117,7 @@ Normal end: summarize what was covered; update JSONC; suggest what to pick up ne
 
 **Sync after saving (if using default storage):** Run via Bash:
 ```bash
-git -C ~/.agents/learning add -A && git -C ~/.agents/learning commit -m "sync: {topic-slug} $(date +%Y-%m-%d)" && git -C ~/.agents/learning push
+git -C ~/.agents/my-learning-data add -A && git -C ~/.agents/my-learning-data commit -m "sync: {topic-slug} $(date +%Y-%m-%d)" && git -C ~/.agents/my-learning-data push
 ```
 If nothing changed, `git commit` will exit cleanly — that's fine.
 
