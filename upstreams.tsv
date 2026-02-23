@@ -1,0 +1,3 @@
+# name<TAB>repo_url<TAB>branch<TAB>target_dir
+codex	https://github.com/openai/codex.git	main	external/codex
+pi-mono	https://github.com/badlogic/pi-mono.git	main	external/pi-mono
