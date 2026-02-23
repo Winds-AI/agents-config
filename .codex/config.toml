@@ -1,0 +1,60 @@
+model = "gpt-5.3-codex"
+model_reasoning_effort = "medium"
+personality = "pragmatic"
+
+responses_websockets_v2 = true
+
+[profiles.workspace_auto]
+sandbox_mode    = "workspace-write"
+approval_policy = "untrusted"
+web_search = "live"
+
+[sandbox_workspace_write]
+network_access = false
+exclude_tmpdir_env_var = true
+exclude_slash_tmp = true
+# writable_roots = ["/mnt/s/Random_stuff/agent/src"]
+
+[features]
+multi_agent = true
+unified_exec = true
+shell_snapshot = true
+steer = true
+collaboration_modes = true
+apps = true
+
+[tui]
+status_line = ["model-with-reasoning", "five-hour-limit", "weekly-limit", "used-tokens"]
+
+
+
+# MCPS
+
+[mcp_servers.brave_search]
+command = "npx"
+args = ["-y", "@modelcontextprotocol/server-brave-search"]
+env = { BRAVE_API_KEY = "BSAdAYq-7LEUC3f2Z2RY27FBGi9P1GO" }
+enabled = false
+
+[mcp_servers.sequential_thinking]
+command = "npx"
+args = ["-y", "@modelcontextprotocol/server-sequential-thinking"]
+
+[mcp_servers.context7]
+url = "https://mcp.context7.com/mcp"
+headers = { CONTEXT7_API_KEY = "ctx7sk-e4f11aa9-fe30-47dd-8090-221b3a13d364" }
+enabled = false
+
+[mcp_servers.frontend-agent-tools]
+  command = "node"
+  args = ["/mnt/s/agent-mcp/dist/index.js"]
+  startup_timeout_sec = 20
+enabled = false
+
+[mcp_servers.frontend-agent-tools.env]
+MCP_TRANSPORT = "stdio"
+OPENAPI_JSON = "https://bandar-app-dev.azurewebsites.net/api/bandar-admin-swagger.json"
+REDMINE_URL = "https://redmine.openxcell.dev"
+REDMINE_API = "9e41e4c6b17faf9df1c13015b537ee953d28e5ba"
+REDMINE_PROJECT = "bandar"
+REDMINE_IMAGE_CACHE_DIR = "./.tmp/redmine-images"

@@ -1,0 +1,157 @@
+#!/usr/bin/env bash
+# Transparent curl wrapper with security enforcement
+
+DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+# Find real curl binary, skipping this wrapper directory
+REAL_CURL="$(PATH="${PATH//"$DIR:"}" command -v curl)"
+if [[ -z "$REAL_CURL" || "$REAL_CURL" == "$DIR/curl" ]]; then
+  echo "Error: Cannot find system curl binary" >&2
+  exit 1
+fi
+
+# Always load locked defaults from config (no per-call token/base overrides).
+# shellcheck disable=SC1091
+source "$DIR/api-env.sh"
+
+MODE="${API_MODE:-read-only}"
+ARGS=("$@")
+argc="${#ARGS[@]}"
+
+die() {
+  echo "$1" >&2
+  exit 1
+}
+
+# Prevent bypassing wrapper restrictions via curl config files or alternate auth mechanisms.
+for a in "${ARGS[@]}"; do
+  case "$a" in
+    -K|--config|--config=*|-u|--user|--oauth2-bearer|--oauth2-bearer=*)
+      die "BLOCKED: curl config/auth overrides are not allowed. Use config.toml defaults."
+      ;;
+  esac
+done
+
+# Identify URL arguments without touching unrelated absolute file paths (e.g. `-o /dev/null`).
+# We treat as URL:
+# - Any argument passed to `--url`
+# - Any positional (non-option) argument not consumed by an option that expects a value
+url_indexes=()
+skip_next=false
+for ((i=0; i<argc; i++)); do
+  if [[ "$skip_next" == true ]]; then
+    skip_next=false
+    continue
+  fi
+
+  a="${ARGS[i]}"
+
+  # Options that consume a value (not exhaustive, but covers all common cases used in this repo).
+  case "$a" in
+    --url)
+      # Next arg is the URL
+      if (( i + 1 < argc )); then
+        url_indexes+=("$((i+1))")
+        skip_next=true
+      fi
+      continue
+      ;;
+    -X|--request|-d|--data|--data-raw|--data-binary|--data-urlencode|--json|-H|--header|-F|--form|-o|--output|-u|--user|-b|--cookie|-c|--cookie-jar|--connect-timeout|--max-time|--retry|--retry-delay|--retry-max-time|--cacert|--cert|--key|--proxy|--proxy-user|--referer|-e|--expect100-timeout)
+      skip_next=true
+      continue
+      ;;
+  esac
+
+  # Handle `--header=...` style.
+  if [[ "$a" == --header=* || "$a" == -H* ]]; then
+    # `-HAuthorization: ...` is possible, but uncommon; ignore here, auth block below handles it.
+    continue
+  fi
+
+  # Positional URL (not starting with '-') is considered a URL.
+  if [[ "$a" != "-"* ]]; then
+    url_indexes+=("$i")
+  fi
+done
+
+# Extract method from args
+method="GET"
+for ((i=0; i<argc; i++)); do
+  case "${ARGS[i]}" in
+    -X|--request) method="${ARGS[i+1]^^}" ;;
+    -d|--data|--data-*) [[ "$method" == "GET" ]] && method="POST" ;;
+  esac
+done
+
+# Auto-follow redirects unless user already set -L/--location
+has_location=false
+for ((i=0; i<argc; i++)); do
+  case "${ARGS[i]}" in
+    -L|--location) has_location=true ;;
+  esac
+done
+if [[ "$has_location" == false ]]; then
+  ARGS+=(-L)
+fi
+
+# Disallow passing custom Authorization header (prevents runtime token override).
+has_auth_header=false
+for ((i=0; i<argc; i++)); do
+  case "${ARGS[i]}" in
+    -H|--header)
+      [[ "${ARGS[i+1]}" == Authorization:* ]] && has_auth_header=true
+      ;;
+    --header=Authorization:*|-HAuthorization:*)
+      has_auth_header=true
+      ;;
+  esac
+done
+
+if [[ "$has_auth_header" == true ]]; then
+  die "BLOCKED: Custom Authorization header is not allowed. Use config.toml defaults."
+fi
+
+# Enforce base URL for URL args:
+# - If URL starts with '/', prefix with API_BASE.
+# - If URL starts with http(s)://, it must be within API_BASE.
+for idx in "${url_indexes[@]}"; do
+  a="${ARGS[idx]}"
+  if [[ "$a" == http://* || "$a" == https://* ]]; then
+    if ! python3 - "$API_BASE" "$a" <<'PY'
+import sys
+from urllib.parse import urlparse
+
+base = urlparse(sys.argv[1])
+u = urlparse(sys.argv[2])
+
+if (u.scheme, u.netloc) != (base.scheme, base.netloc):
+    raise SystemExit(1)
+
+base_path = base.path.rstrip("/")
+u_path = u.path.rstrip("/")
+
+# base might be "https://host" (empty path) or "https://host/api"
+if base_path:
+    if not (u_path == base_path or u_path.startswith(base_path + "/")):
+        raise SystemExit(1)
+PY
+    then
+      die "BLOCKED: URL must be within API_BASE=$API_BASE"
+    fi
+  elif [[ "$a" == /* ]]; then
+    ARGS[idx]="${API_BASE}${a}"
+  fi
+done
+
+# Inject default token from config.
+ARGS+=(-H "Authorization: Bearer $API_TOKEN_VALUE")
+
+# Check permission
+case "$MODE" in
+  read-only)    [[ "$method" == "GET" ]] ;;
+  safe-updates) [[ "$method" =~ ^(GET|POST|PUT|PATCH)$ ]] ;;
+  full-access)  true ;;
+  *) false ;;
+esac || { echo "BLOCKED: $method not allowed (mode: $MODE)" >&2; exit 1; }
+
+exec "$REAL_CURL" "${ARGS[@]}"

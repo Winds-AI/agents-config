@@ -1,0 +1,594 @@
+#!/usr/bin/env python3
+"""
+Progressive OpenAPI discovery CLI for AI agents.
+
+Sub-commands:
+  search <term>        Case-insensitive path/summary search, compact table
+  detail <path> [method]  Full endpoint details with resolved schemas
+  schema <name>        Inspect a component schema
+  paths                List all paths
+  tags                 List tags with endpoint counts
+  refresh              Re-download and cache the OpenAPI spec
+
+Reads config from .agent/scripts/config.toml (same as api-env.sh).
+Caches OpenAPI JSON to .agent/cache/openapi.json.
+No external dependencies — stdlib only.
+"""
+
+import argparse
+import json
+import sys
+import tomllib
+import urllib.request
+import urllib.error
+from pathlib import Path
+
+SCRIPT_DIR = Path(__file__).resolve().parent
+CONFIG_PATH = SCRIPT_DIR / "config.toml"
+CACHE_DIR = SCRIPT_DIR.parent / "cache"
+CACHE_FILE = CACHE_DIR / "openapi.json"
+
+MAX_REF_DEPTH = 3
+
+
+# ── Config ──────────────────────────────────────────────────────────────────
+
+def load_config():
+    cfg = tomllib.loads(CONFIG_PATH.read_text(encoding="utf-8"))
+    projects = cfg.get("projects") or {}
+    active_project = cfg.get("active_project") or next(iter(projects), None)
+    if not active_project or active_project not in projects:
+        die("Invalid or missing active_project in config.toml")
+
+    proj = projects[active_project]
+    envs = proj.get("envs") or {}
+    active_env = cfg.get("active_env") or next(iter(envs), None)
+    if not active_env or active_env not in envs:
+        die("Invalid or missing active_env in config.toml")
+
+    env_cfg = envs[active_env]
+    openapi_url = env_cfg.get("openapi_url")
+    if not openapi_url:
+        die("Missing projects.<project>.envs.<env>.openapi_url in config.toml")
+
+    return {"openapi_url": openapi_url}
+
+
+# ── Spec loading & caching ──────────────────────────────────────────────────
+
+def download_spec(url):
+    CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    try:
+        req = urllib.request.Request(url, headers={"Accept": "application/json"})
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            data = resp.read()
+    except urllib.error.URLError as e:
+        die(f"Failed to download OpenAPI spec: {e}")
+    # Validate JSON
+    try:
+        spec = json.loads(data)
+    except json.JSONDecodeError as e:
+        die(f"OpenAPI spec is not valid JSON: {e}")
+    CACHE_FILE.write_bytes(data)
+    return spec
+
+
+def load_spec(auto_download=True):
+    if CACHE_FILE.exists():
+        return json.loads(CACHE_FILE.read_text(encoding="utf-8"))
+    if auto_download:
+        cfg = load_config()
+        print(f"Downloading OpenAPI spec from {cfg['openapi_url']}...", file=sys.stderr)
+        return download_spec(cfg["openapi_url"])
+    die("No cached spec. Run: api refresh")
+
+
+# ── $ref resolution ─────────────────────────────────────────────────────────
+
+def resolve_ref(spec, ref, depth=0, seen=None):
+    """Follow a $ref pointer like #/components/schemas/Foo."""
+    if seen is None:
+        seen = set()
+    if depth > MAX_REF_DEPTH or ref in seen:
+        return {"type": "object", "_truncated": True, "_ref": ref}
+    seen.add(ref)
+
+    parts = ref.lstrip("#/").split("/")
+    node = spec
+    for p in parts:
+        node = node.get(p, {})
+    return resolve_schema(spec, node, depth, seen)
+
+
+def resolve_schema(spec, schema, depth=0, seen=None):
+    """Recursively resolve a schema, handling $ref, allOf, oneOf, anyOf."""
+    if seen is None:
+        seen = set()
+    if not schema or depth > MAX_REF_DEPTH:
+        return schema or {}
+
+    if "$ref" in schema:
+        return resolve_ref(spec, schema["$ref"], depth + 1, seen)
+
+    # allOf: merge all sub-schemas
+    if "allOf" in schema:
+        merged = {}
+        merged_props = {}
+        merged_required = []
+        for sub in schema["allOf"]:
+            resolved = resolve_schema(spec, sub, depth + 1, seen)
+            merged_props.update(resolved.get("properties", {}))
+            merged_required.extend(resolved.get("required", []))
+            for k, v in resolved.items():
+                if k not in ("properties", "required"):
+                    merged[k] = v
+        if merged_props:
+            merged["properties"] = merged_props
+        if merged_required:
+            merged["required"] = list(set(merged_required))
+        return merged
+
+    # oneOf / anyOf: resolve each variant
+    for keyword in ("oneOf", "anyOf"):
+        if keyword in schema:
+            schema = dict(schema)
+            schema[keyword] = [resolve_schema(spec, s, depth + 1, seen) for s in schema[keyword]]
+            return schema
+
+    # Resolve nested schemas (copy once to avoid mutating the original)
+    needs_copy = ("properties" in schema
+                  or "items" in schema
+                  or isinstance(schema.get("additionalProperties"), dict))
+    if needs_copy:
+        schema = dict(schema)
+        if "properties" in schema:
+            schema["properties"] = {
+                k: resolve_schema(spec, v, depth + 1, seen)
+                for k, v in schema["properties"].items()
+            }
+        if "items" in schema:
+            schema["items"] = resolve_schema(spec, schema["items"], depth + 1, seen)
+        if isinstance(schema.get("additionalProperties"), dict):
+            schema["additionalProperties"] = resolve_schema(spec, schema["additionalProperties"], depth + 1, seen)
+
+    return schema
+
+
+# ── Formatting helpers ──────────────────────────────────────────────────────
+
+def type_str(schema):
+    """Compact type description from a schema."""
+    if not schema:
+        return "any"
+    if schema.get("_truncated"):
+        ref = schema.get("_ref", "")
+        name = ref.rsplit("/", 1)[-1] if "/" in ref else ref
+        return f"{name} (circular)"
+
+    t = schema.get("type", "")
+    fmt = schema.get("format", "")
+    enum = schema.get("enum")
+
+    if enum:
+        return f"enum: {', '.join(str(e) for e in enum)}"
+    if t == "array":
+        items = schema.get("items", {})
+        return f"array<{type_str(items)}>"
+    if t == "object":
+        return "object"
+    if fmt:
+        return f"{t} ({fmt})"
+    if "oneOf" in schema:
+        return " | ".join(type_str(s) for s in schema["oneOf"])
+    if "anyOf" in schema:
+        return " | ".join(type_str(s) for s in schema["anyOf"])
+    return t or "any"
+
+
+def format_properties(schema, required_list=None, indent=2):
+    """Format schema properties as a compact list."""
+    props = schema.get("properties", {})
+    required = set(required_list or schema.get("required", []))
+    if not props:
+        return ""
+    lines = []
+    pad = " " * indent
+    max_name = max(len(k) for k in props)
+    max_type = max(len(type_str(v)) for v in props.values())
+    for name, prop in props.items():
+        req = "required" if name in required else "optional"
+        desc = prop.get("description", "")
+        ts = type_str(prop)
+        line = f"{pad}{name:<{max_name}}  {ts:<{max_type}}  {req}"
+        if desc:
+            line += f"  {desc}"
+        lines.append(line)
+    return "\n".join(lines)
+
+
+def get_summary(operation):
+    """Get summary or operationId from an operation."""
+    return operation.get("summary") or operation.get("operationId") or ""
+
+
+HTTP_METHODS = ("get", "post", "put", "patch", "delete")
+
+
+def find_path(spec, target_path):
+    """Find a path entry, falling back to case-insensitive match."""
+    paths = spec.get("paths", {})
+    if target_path in paths:
+        return target_path, paths[target_path]
+    for p, data in paths.items():
+        if p.lower() == target_path.lower():
+            return p, data
+    die(f"Path not found: {target_path}")
+
+
+# ── Sub-commands ────────────────────────────────────────────────────────────
+
+def cmd_search(args, spec):
+    term = args.term.lower()
+    paths = spec.get("paths", {})
+    matches = []
+
+    for path, methods in paths.items():
+        for method in HTTP_METHODS:
+            op = methods.get(method)
+            if not op:
+                continue
+            summary = get_summary(op)
+            searchable = f"{path} {summary} {op.get('operationId', '')}".lower()
+            tags = " ".join(op.get("tags", [])).lower()
+            if term in searchable or term in tags:
+                matches.append((method.upper(), path, summary))
+
+    if not matches:
+        print(f"No matches for \"{args.term}\".")
+        return
+
+    max_path = max(len(m[1]) for m in matches)
+    print(f"Matches for \"{args.term}\" ({len(matches)} endpoints):\n")
+    for method, path, summary in matches:
+        print(f"  {method:<7} {path:<{max_path}}  {summary}")
+
+
+def cmd_detail(args, spec):
+    target_path, path_data = find_path(spec, args.path)
+    target_method = args.method.lower() if args.method else None
+
+    methods_to_show = [target_method] if target_method else [
+        m for m in HTTP_METHODS if m in path_data
+    ]
+
+    for method in methods_to_show:
+        op = path_data.get(method)
+        if not op:
+            print(f"No {method.upper()} method on {target_path}")
+            continue
+
+        summary = get_summary(op)
+        tags = ", ".join(op.get("tags", []))
+
+        print(f"## {method.upper()} {target_path}")
+        if summary:
+            print(f"Summary: {summary}")
+        if tags:
+            print(f"Tags: {tags}")
+        if op.get("operationId"):
+            print(f"OperationId: {op['operationId']}")
+
+        # Parameters
+        params = op.get("parameters", [])
+        if params:
+            print(f"\nParameters:")
+            max_name = max(len(p.get("name", "")) for p in params)
+            for p in params:
+                name = p.get("name", "")
+                location = p.get("in", "")
+                required = "required" if p.get("required") else "optional"
+                schema = resolve_schema(spec, p.get("schema", {}))
+                ts = type_str(schema)
+                desc = p.get("description", "")
+                line = f"  {name:<{max_name}}  {location:<6} {required:<9} {ts}"
+                if desc:
+                    line += f"  {desc}"
+                print(line)
+
+        # Request body
+        body = op.get("requestBody")
+        if body:
+            print(f"\nRequest Body{' (required)' if body.get('required') else ' (optional)'}:")
+            content = body.get("content", {})
+            for media_type, media in content.items():
+                schema = resolve_schema(spec, media.get("schema", {}))
+                print(f"  Content-Type: {media_type}")
+                print(f"  Type: {type_str(schema)}")
+                prop_text = format_properties(schema, indent=4)
+                if prop_text:
+                    print(f"  Properties:\n{prop_text}")
+
+        # Responses
+        responses = op.get("responses", {})
+        if responses:
+            # Success responses first
+            for code in sorted(responses.keys()):
+                resp = responses[code]
+                desc = resp.get("description", "")
+                content = resp.get("content", {})
+
+                for media_type, media in content.items():
+                    schema = resolve_schema(spec, media.get("schema", {}))
+                    print(f"\nResponse ({code}): {desc}")
+                    print(f"  Type: {type_str(schema)}")
+                    prop_text = format_properties(schema, indent=4)
+                    if prop_text:
+                        print(f"  Properties:\n{prop_text}")
+
+            error_codes = [c for c in sorted(responses.keys()) if c >= "400"]
+            if error_codes:
+                print(f"\nError Responses: {', '.join(error_codes)}")
+
+        print()  # blank line between methods
+
+
+def cmd_schema(args, spec):
+    schemas = spec.get("components", {}).get("schemas", {})
+    name = args.name
+
+    # Exact match first
+    schema = schemas.get(name)
+    if not schema:
+        # Case-insensitive search
+        for k, v in schemas.items():
+            if k.lower() == name.lower():
+                schema = v
+                name = k
+                break
+    if not schema:
+        # Partial match
+        matches = [k for k in schemas if name.lower() in k.lower()]
+        if len(matches) == 1:
+            name = matches[0]
+            schema = schemas[name]
+        elif matches:
+            print(f"Multiple schemas match \"{args.name}\":\n")
+            for m in sorted(matches):
+                print(f"  {m}")
+            return
+        else:
+            die(f"Schema not found: {args.name}")
+
+    resolved = resolve_schema(spec, schema)
+    print(f"## {name} (#/components/schemas/{name})")
+    print(f"Type: {type_str(resolved)}")
+
+    if resolved.get("description"):
+        print(f"Description: {resolved['description']}")
+
+    prop_text = format_properties(resolved)
+    if prop_text:
+        print(f"\nProperties:\n{prop_text}")
+
+    # Show enum values if top-level enum
+    if resolved.get("enum"):
+        print(f"\nEnum values: {', '.join(str(e) for e in resolved['enum'])}")
+
+
+def cmd_paths(args, spec):
+    paths = spec.get("paths", {})
+    for path in sorted(paths.keys()):
+        methods = [m.upper() for m in HTTP_METHODS if m in paths[path]]
+        print(f"  {', '.join(methods):<30} {path}")
+
+
+def cmd_tags(args, spec):
+    paths = spec.get("paths", {})
+    tag_counts = {}
+    for path, methods in paths.items():
+        for method in HTTP_METHODS:
+            op = methods.get(method)
+            if not op:
+                continue
+            for tag in op.get("tags", ["(untagged)"]):
+                tag_counts[tag] = tag_counts.get(tag, 0) + 1
+
+    if not tag_counts:
+        print("No tags found.")
+        return
+
+    max_tag = max(len(t) for t in tag_counts)
+    for tag in sorted(tag_counts.keys()):
+        print(f"  {tag:<{max_tag}}  {tag_counts[tag]} endpoints")
+
+
+def _validate_value(spec, schema, value, path_prefix, results):
+    """Recursively validate a value against a resolved schema, collecting results."""
+    if not schema:
+        return
+
+    schema = resolve_schema(spec, schema)
+    s_type = schema.get("type", "")
+
+    # Null check
+    if value is None:
+        if schema.get("nullable"):
+            results.append(("ok", path_prefix, "nullable", "null"))
+        else:
+            results.append(("warn", path_prefix, s_type or "non-null", "null"))
+        return
+
+    # Type checking
+    type_map = {
+        "string": (str,),
+        "integer": (int,),
+        "number": (int, float),
+        "boolean": (bool,),
+        "array": (list,),
+        "object": (dict,),
+    }
+
+    if s_type in type_map:
+        actual_type = type(value).__name__
+        if not isinstance(value, type_map[s_type]):
+            results.append(("fail", path_prefix, s_type, actual_type))
+            return
+        results.append(("ok", path_prefix, s_type, actual_type))
+
+    # Enum check
+    if schema.get("enum") and value not in schema["enum"]:
+        results.append(("fail", f"{path_prefix} (enum)", f"one of {schema['enum']}", repr(value)))
+
+    # Recurse into object properties
+    if s_type == "object" and isinstance(value, dict):
+        props = schema.get("properties", {})
+        required = set(schema.get("required", []))
+
+        for key, prop_schema in props.items():
+            child_path = f"{path_prefix}.{key}" if path_prefix else key
+            if key in value:
+                _validate_value(spec, prop_schema, value[key], child_path, results)
+            elif key in required:
+                results.append(("fail", child_path, "required", "missing"))
+
+        # Extra fields not in spec
+        for key in value:
+            if key not in props and props:  # only flag if spec defines properties
+                child_path = f"{path_prefix}.{key}" if path_prefix else key
+                results.append(("extra", child_path, "-", type(value[key]).__name__))
+
+    # Recurse into array items (check first element only to keep output short)
+    if s_type == "array" and isinstance(value, list) and value:
+        items_schema = schema.get("items", {})
+        if items_schema:
+            _validate_value(spec, items_schema, value[0], f"{path_prefix}[0]", results)
+
+
+def cmd_validate(args, spec):
+    target_path, path_data = find_path(spec, args.path)
+    method = args.method.lower()
+    status = args.status
+
+    op = path_data.get(method)
+    if not op:
+        die(f"No {method.upper()} method on {target_path}")
+
+    # Find response schema for given status code
+    responses = op.get("responses", {})
+    resp = responses.get(status)
+    if not resp:
+        for code in sorted(responses.keys()):
+            if code.startswith("2"):
+                resp, status = responses[code], code
+                break
+    if not resp:
+        die(f"No response schema for status {status} on {method.upper()} {target_path}")
+
+    resp_schema = next(iter(resp.get("content", {}).values()), {}).get("schema")
+    if not resp_schema:
+        print(f"No response body schema defined for {method.upper()} {target_path} ({status})")
+        return
+
+    # Read JSON from stdin
+    if sys.stdin.isatty():
+        die("No input. Pipe a JSON response, e.g.: curl -s /path | api validate /path GET")
+
+    try:
+        raw = sys.stdin.read()
+        data = json.loads(raw)
+    except json.JSONDecodeError as e:
+        die(f"Invalid JSON input: {e}")
+
+    # Validate
+    results = []
+    resolved = resolve_schema(spec, resp_schema)
+    _validate_value(spec, resolved, data, "", results)
+
+    # Print report
+    print(f"Validating {method.upper()} {target_path} ({status})\n")
+
+    ok_count = sum(1 for r in results if r[0] == "ok")
+    fail_count = sum(1 for r in results if r[0] == "fail")
+    warn_count = sum(1 for r in results if r[0] == "warn")
+    extra_count = sum(1 for r in results if r[0] == "extra")
+
+    symbols = {"ok": "+", "fail": "x", "warn": "?", "extra": "~"}
+    max_path = max((len(r[1]) for r in results), default=0)
+
+    for status_flag, field, expected, actual in results:
+        sym = symbols[status_flag]
+        if status_flag == "ok":
+            print(f"  {sym} {field:<{max_path}}  {expected}")
+        elif status_flag == "extra":
+            print(f"  {sym} {field:<{max_path}}  not in spec (extra, type: {actual})")
+        else:
+            print(f"  {sym} {field:<{max_path}}  expected {expected}, got {actual}")
+
+    print(f"\nSummary: {ok_count} match, {fail_count} mismatch, {warn_count} warning, {extra_count} extra")
+
+
+def cmd_refresh(args, spec=None):
+    cfg = load_config()
+    print(f"Downloading OpenAPI spec from {cfg['openapi_url']}...", file=sys.stderr)
+    download_spec(cfg["openapi_url"])
+    print("Spec cached to .agent/cache/openapi.json")
+
+
+# ── Main ────────────────────────────────────────────────────────────────────
+
+def die(msg):
+    print(f"Error: {msg}", file=sys.stderr)
+    sys.exit(1)
+
+
+def main():
+    parser = argparse.ArgumentParser(
+        prog="api",
+        description="Progressive OpenAPI discovery CLI for AI agents.",
+    )
+    sub = parser.add_subparsers(dest="command")
+
+    p_search = sub.add_parser("search", help="Search endpoints by path/summary/tag")
+    p_search.add_argument("term", help="Search term (case-insensitive)")
+
+    p_detail = sub.add_parser("detail", help="Full endpoint details with resolved schemas")
+    p_detail.add_argument("path", help="API path (e.g. /bandar-admin/certificates)")
+    p_detail.add_argument("method", nargs="?", help="HTTP method (GET, POST, etc.)")
+
+    p_schema = sub.add_parser("schema", help="Inspect a component schema")
+    p_schema.add_argument("name", help="Schema name (e.g. Certificate)")
+
+    p_validate = sub.add_parser("validate", help="Validate a JSON response against the spec (reads from stdin)")
+    p_validate.add_argument("path", help="API path (e.g. /bandar-admin/certificates)")
+    p_validate.add_argument("method", help="HTTP method (GET, POST, etc.)")
+    p_validate.add_argument("--status", default="200", help="HTTP status code to validate against (default: 200)")
+
+    sub.add_parser("paths", help="List all API paths")
+    sub.add_parser("tags", help="List tags with endpoint counts")
+    sub.add_parser("refresh", help="Re-download and cache the OpenAPI spec")
+
+    args = parser.parse_args()
+    if not args.command:
+        parser.print_help()
+        sys.exit(1)
+
+    # refresh doesn't need existing spec
+    if args.command == "refresh":
+        cmd_refresh(args)
+        return
+
+    spec = load_spec()
+
+    commands = {
+        "search": cmd_search,
+        "detail": cmd_detail,
+        "schema": cmd_schema,
+        "validate": cmd_validate,
+        "paths": cmd_paths,
+        "tags": cmd_tags,
+    }
+    commands[args.command](args, spec)
+
+
+if __name__ == "__main__":
+    main()

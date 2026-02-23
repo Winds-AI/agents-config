@@ -1,0 +1,60 @@
+#!/usr/bin/env bash
+# Transparent curl wrapper with security enforcement
+
+REAL_CURL="/usr/bin/curl"
+MODE="${API_MODE:-read-only}"
+ARGS=("$@")
+
+# Extract method from args
+method="GET"
+for ((i=0; i<$#; i++)); do
+  case "${ARGS[i]}" in
+    -X|--request) method="${ARGS[i+1]^^}" ;;
+    -d|--data|--data-*) [[ "$method" == "GET" ]] && method="POST" ;;
+  esac
+done
+
+# Auto-follow redirects unless user already set -L/--location
+has_location=false
+for ((i=0; i<$#; i++)); do
+  case "${ARGS[i]}" in
+    -L|--location) has_location=true ;;
+  esac
+done
+if [[ "$has_location" == false ]]; then
+  ARGS+=(-L)
+fi
+
+# Require per-call token selection (or explicit Authorization header)
+has_auth_header=false
+for ((i=0; i<$#; i++)); do
+  case "${ARGS[i]}" in
+    -H|--header)
+      [[ "${ARGS[i+1]}" == Authorization:* ]] && has_auth_header=true
+      ;;
+  esac
+done
+
+if [[ "$has_auth_header" == false ]]; then
+  if [[ -z "${API_TOKEN_NAME:-}" ]]; then
+    echo "BLOCKED: API_TOKEN_NAME is required (or pass Authorization header)" >&2
+    exit 1
+  fi
+  TOKENS_FILE="${API_TOKENS_FILE:-$PWD/.agent/tokens.toml}"
+  TOKEN_VALUE="$(grep "^${API_TOKEN_NAME} " "$TOKENS_FILE" | sed 's/.*"\(.*\)"/\1/')"
+  if [[ -z "$TOKEN_VALUE" ]]; then
+    echo "BLOCKED: token not found for API_TOKEN_NAME=$API_TOKEN_NAME" >&2
+    exit 1
+  fi
+  ARGS+=(-H "Authorization: Bearer $TOKEN_VALUE")
+fi
+
+# Check permission
+case "$MODE" in
+  read-only)    [[ "$method" == "GET" ]] ;;
+  safe-updates) [[ "$method" =~ ^(GET|POST|PUT|PATCH)$ ]] ;;
+  full-access)  true ;;
+  *) false ;;
+esac || { echo "BLOCKED: $method not allowed (mode: $MODE)" >&2; exit 1; }
+
+exec "$REAL_CURL" "${ARGS[@]}"

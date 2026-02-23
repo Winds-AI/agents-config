@@ -1,0 +1,9 @@
+{
+    "extensions": [
+        ".pi/extensions/ask-user-question.ts",
+        "./.pi/extensions/memory-monitor.ts",
+        "./.pi/extensions/kittentts/index.ts",
+        "./.pi/extensions/verbalized-sampling/verbalized-sampling.ts"
+    ]
+}
+

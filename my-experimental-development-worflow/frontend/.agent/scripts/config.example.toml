@@ -1,0 +1,34 @@
+# Agent API Configuration
+#
+# Purpose:
+# - One file for API base URLs + tokens across projects/environments.
+# - Scripts read defaults from here and DO NOT allow per-call overrides.
+#
+# Setup:
+# - Copy this file to config.toml: cp config.example.toml config.toml
+# - Fill in your token values.
+#
+# Notes:
+# - Do not commit real production tokens. Keep this file scoped to dev/test.
+# - The curl wrapper will reject custom Authorization headers and URLs outside the active base.
+
+# Active selection (used by scripts)
+active_project = "bandar"
+active_env = "dev"
+
+[projects.bandar]
+# Which token key under [projects.<name>.tokens] to use by default.
+default_token = "dev_superuser"
+
+[projects.bandar.envs.dev]
+api_base = "<your-dev-api-base-url>"
+api_mode = "safe-updates" # read-only | safe-updates | full-access
+openapi_url = "<your-dev-openapi-json-url>"
+
+[projects.bandar.envs.local]
+api_base = "http://localhost:7071/api"
+api_mode = "safe-updates"
+openapi_url = "http://localhost:7071/api/<your-swagger-json-path>"
+
+[projects.bandar.tokens]
+dev_superuser = "<your-jwt-token-here>"
