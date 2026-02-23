@@ -1,0 +1,4 @@
+cache/openapi.json
+scripts/config.toml
+scripts/tokens.toml
+scripts/__pycache__/

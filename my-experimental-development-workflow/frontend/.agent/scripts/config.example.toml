@@ -13,25 +13,25 @@
 # - The curl wrapper will reject custom Authorization headers and URLs outside the active base.
 
 # Active selection (used by scripts)
-active_project = "bandar"
+active_project = "myproject"
 active_env = "dev"
 default_token = "dev_superuser"
 
-[projects.bandar.envs.dev]
+[projects.myproject.envs.dev]
 api_base = "<your-dev-api-base-url>"
 api_mode = "safe-updates" # read-only | safe-updates | full-access
 openapi_url = "<your-dev-openapi-json-url>"
 
-[projects.bandar.envs.dev.tokens]
+[projects.myproject.envs.dev.tokens]
 dev_superuser = "<your-jwt-token-here>"
 dev_user = "<your-jwt-token-here>"
 
 
-[projects.bandar.envs.local]
-api_base = "http://localhost:7071/api"
+[projects.myproject.envs.local]
+api_base = "http://localhost:3000/api"
 api_mode = "safe-updates"
-openapi_url = "http://localhost:7071/api/<your-swagger-json-path>"
+openapi_url = "http://localhost:3000/api/<your-swagger-json-path>"
 
-[projects.bandar.envs.local.tokens]
+[projects.myproject.envs.local.tokens]
 dev_superuser = "<your-jwt-token-here>"
 dev_user = "<your-jwt-token-here>"

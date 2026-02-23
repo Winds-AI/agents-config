@@ -534,6 +534,136 @@ def cmd_refresh(args, spec=None):
     print("Spec cached to .agent/cache/openapi.json")
 
 
+def cmd_status(args, spec=None):
+    if not CONFIG_PATH.exists():
+        die("config.toml not found. Copy config.example.toml to config.toml and fill in values.")
+
+    cfg = tomllib.loads(CONFIG_PATH.read_text(encoding="utf-8"))
+    projects = cfg.get("projects") or {}
+    active_project = cfg.get("active_project") or next(iter(projects), None)
+    proj = projects.get(active_project, {}) if active_project else {}
+    envs = proj.get("envs") or {}
+    active_env = cfg.get("active_env") or next(iter(envs), None)
+    env_cfg = envs.get(active_env, {}) if active_env else {}
+
+    api_base = env_cfg.get("api_base", "(not set)")
+    api_mode = env_cfg.get("api_mode", "safe-updates")
+    openapi_url = env_cfg.get("openapi_url", "(not set)")
+
+    tokens = env_cfg.get("tokens") or {}
+    default_token_key = cfg.get("default_token") or next(iter(tokens), None)
+
+    spec_status = f"cached ({CACHE_FILE})" if CACHE_FILE.exists() else "not cached (run: api refresh)"
+
+    print(f"Project : {active_project or '(not set)'}")
+    print(f"Env     : {active_env or '(not set)'}")
+    print(f"Mode    : {api_mode}")
+    print(f"Base    : {api_base}")
+    print(f"Token   : {default_token_key or '(not set)'}")
+    print(f"OpenAPI : {openapi_url}")
+    print(f"Spec    : {spec_status}")
+
+
+# ── api example ─────────────────────────────────────────────────────────────
+
+def make_placeholder(schema, name="value"):
+    """Generate a representative placeholder value for a resolved schema."""
+    if not schema:
+        return None
+    enum = schema.get("enum")
+    if enum:
+        return enum[0]
+    t = schema.get("type", "")
+    fmt = schema.get("format", "")
+    if t == "string":
+        if fmt == "uuid":
+            return "00000000-0000-0000-0000-000000000000"
+        if fmt in ("date", "date-time"):
+            return "2024-01-01"
+        if fmt == "email":
+            return "user@example.com"
+        return name
+    if t == "integer":
+        return 1
+    if t == "number":
+        return 1.0
+    if t == "boolean":
+        return True
+    if t == "array":
+        return [make_placeholder(schema.get("items") or {}, name)]
+    if t == "object":
+        props = schema.get("properties", {})
+        required = set(schema.get("required", []))
+        if props:
+            # Include required fields; if none marked required, include all
+            chosen = {k: v for k, v in props.items() if k in required} or props
+            return {k: make_placeholder(v, k) for k, v in chosen.items()}
+        return {}
+    return name
+
+
+def cmd_example(args, spec):
+    target_path, path_data = find_path(spec, args.path)
+    target_method = args.method.lower() if args.method else next(
+        (m for m in HTTP_METHODS if m in path_data), None
+    )
+    if not target_method:
+        die(f"No supported HTTP methods on {target_path}")
+
+    op = path_data.get(target_method)
+    if not op:
+        die(f"No {target_method.upper()} method on {target_path}")
+
+    summary = get_summary(op)
+
+    # Substitute path parameters and collect query parameters
+    url = target_path
+    required_query = []
+    optional_query = []
+
+    for p in op.get("parameters", []):
+        schema = resolve_schema(spec, p.get("schema", {}))
+        placeholder = make_placeholder(schema, p["name"])
+        loc = p.get("in", "")
+        if loc == "path":
+            url = url.replace(f"{{{p['name']}}}", str(placeholder))
+        elif loc == "query":
+            pair = f"{p['name']}={placeholder}"
+            if p.get("required"):
+                required_query.append(pair)
+            else:
+                optional_query.append(pair)
+
+    if required_query:
+        url += "?" + "&".join(required_query)
+
+    # Build curl command lines
+    lines = ["curl"]
+    if target_method.upper() != "GET":
+        lines.append(f"  -X {target_method.upper()}")
+
+    body_obj = op.get("requestBody")
+    if body_obj:
+        content = body_obj.get("content", {})
+        media_type = next(iter(content), "application/json")
+        schema = resolve_schema(spec, content.get(media_type, {}).get("schema", {}))
+        body_data = make_placeholder(schema, "body")
+        lines.append(f'  -H "Content-Type: {media_type}"')
+        if isinstance(body_data, (dict, list)):
+            lines.append(f"  -d '{json.dumps(body_data)}'")
+        elif body_data is not None:
+            lines.append(f"  -d '{body_data}'")
+
+    lines.append(f'  "{url}"')
+
+    print(f"# {target_method.upper()} {target_path}" + (f" — {summary}" if summary else ""))
+    print()
+    print(" \\\n".join(lines))
+
+    if optional_query:
+        print(f"\n# Optional query params: {', '.join(optional_query)}")
+
+
 # ── Main ────────────────────────────────────────────────────────────────────
 
 def die(msg):
@@ -567,14 +697,23 @@ def main():
     sub.add_parser("tags", help="List tags with endpoint counts")
     sub.add_parser("refresh", help="Re-download and cache the OpenAPI spec")
 
+    p_example = sub.add_parser("example", help="Generate a ready-to-run curl command for an endpoint")
+    p_example.add_argument("path", help="API path (e.g. /users/{id})")
+    p_example.add_argument("method", nargs="?", help="HTTP method (GET, POST, etc.)")
+
+    sub.add_parser("status", help="Show active project, env, token, and spec cache state")
+
     args = parser.parse_args()
     if not args.command:
         parser.print_help()
         sys.exit(1)
 
-    # refresh doesn't need existing spec
+    # refresh and status don't need existing spec
     if args.command == "refresh":
         cmd_refresh(args)
+        return
+    if args.command == "status":
+        cmd_status(args)
         return
 
     spec = load_spec()
@@ -586,6 +725,7 @@ def main():
         "validate": cmd_validate,
         "paths": cmd_paths,
         "tags": cmd_tags,
+        "example": cmd_example,
     }
     commands[args.command](args, spec)
 

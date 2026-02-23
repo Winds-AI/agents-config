@@ -4,32 +4,28 @@ Setup: `source .agent/scripts/api-env.sh` (once per session — loads config, ad
 
 ## curl wrapper
 
-```bash
 curl "/bandar-admin/discounts"
 curl -X POST -d '{"code":"X"}' "/bandar-admin/discounts"
-```
-
-Locked to `config.toml` defaults — no custom Authorization headers, no URLs outside API_BASE.
 
 ## api CLI (OpenAPI discovery)
 
-```bash
 api search <keyword>                  # find endpoints
 api detail <path> [method]            # full endpoint details + resolved schemas
 api schema <name>                     # inspect a component schema
+api example <path> [method]           # generate ready-to-run curl command
 api paths                             # list all paths
 api tags                              # list tags with endpoint counts
+api status                            # show active project/env/token/spec state
 api refresh                           # re-download spec
-```
 
 ## Response validation
-
-```bash
 curl -s "<path>" | api validate <path> <METHOD> [--status 200]
-```
 
 Output: `+` match, `x` mismatch, `?` nullable warning, `~` extra field.
 
 ## Workflow
 
-1. `api search` → 2. `api detail` → 3. `api schema` → 4. `curl | api validate`
+1. api search
+2. api detail
+3. api example
+4. curl | api validate

@@ -2,7 +2,7 @@
 
 ## Procedure
 
-1. Source the API environment: `source .agent/scripts/api-env.sh`
+1. From project root, source the API environment: `source .agent/scripts/api-env.sh`
 2. Search for relevant endpoints: `api search <keyword>`
    - One broad query first (e.g., `api search certificate`)
    - Re-search only if 0 matches or specific endpoint missing

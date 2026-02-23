@@ -17,7 +17,7 @@ Validate behavior (spec drift + parameter acceptance), not just status codes.
 
 ## Procedure
 
-1. Run: `source .agent/scripts/api-env.sh`
+1. From project root: `source .agent/scripts/api-env.sh`
 2. Per endpoint: validate happy path + 1 contract edge:
    ```bash
    # curl wrapper reads .agent/scripts/config.toml (locked: no per-call overrides)

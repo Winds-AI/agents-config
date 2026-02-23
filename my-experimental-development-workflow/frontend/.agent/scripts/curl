@@ -3,8 +3,12 @@
 
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-# Find real curl binary, skipping this wrapper directory
-REAL_CURL="$(PATH="${PATH//"$DIR:"}" command -v curl)"
+# Find real curl binary, skipping this wrapper directory.
+# Wrap PATH in colons so every entry (including first/last) has a colon on each side,
+# making :DIR: removal reliable regardless of position.
+_CLEAN_PATH=$(printf ':%s:' "$PATH" | sed "s|:${DIR}:||g; s/^://; s/:$//")
+REAL_CURL="$(PATH="$_CLEAN_PATH" command -v curl)"
+unset _CLEAN_PATH
 if [[ -z "$REAL_CURL" || "$REAL_CURL" == "$DIR/curl" ]]; then
   echo "Error: Cannot find system curl binary" >&2
   exit 1
