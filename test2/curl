@@ -1,0 +1,322 @@
+#!/usr/bin/env bash
+# curl - Safe API caller for coding agents
+# Usage: ./curl <METHOD> <path> [extra-curl-args...]
+# Example:
+#   ./curl GET /users
+#   ./curl POST /users -d '{"name": "[agent-test] John"}'
+#   ./curl DELETE /users/123
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+CONFIG_FILE="$SCRIPT_DIR/config.toml"
+LOGS_DIR="$SCRIPT_DIR/logs"
+
+# ── Colors ────────────────────────────────────────────────────────────
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[0;33m'
+BLUE='\033[0;34m'
+CYAN='\033[0;36m'
+BOLD='\033[1m'
+DIM='\033[2m'
+RESET='\033[0m'
+
+# ── TOML Parser ───────────────────────────────────────────────────────
+TOML_FLAT=""
+
+toml_parse() {
+  local file="$1" prefix="" line key value
+  TOML_FLAT=""
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    line="${line%$'\r'}"
+    [[ -z "$line" || "$line" =~ ^[[:space:]]*# ]] && continue
+    if [[ "$line" =~ ^\[([^]]+)\] ]]; then
+      prefix="${BASH_REMATCH[1]}"
+      continue
+    fi
+    if [[ "$line" =~ ^[[:space:]]*([a-zA-Z_][a-zA-Z0-9_]*)[[:space:]]*=[[:space:]]*(.*) ]]; then
+      key="${BASH_REMATCH[1]}"
+      value="${BASH_REMATCH[2]}"
+      value="${value#\"}"
+      value="${value%\"}"
+      if [[ -n "$prefix" ]]; then
+        TOML_FLAT+="${prefix}.${key}=${value}"$'\n'
+      else
+        TOML_FLAT+="${key}=${value}"$'\n'
+      fi
+    fi
+  done < "$file"
+}
+
+toml_get() {
+  local key="$1" result
+  result=$(printf '%s' "$TOML_FLAT" | grep "^${key}=" | head -1 | cut -d'=' -f2-)
+  printf '%s' "$result"
+}
+
+# ── Load Config ───────────────────────────────────────────────────────
+if [[ ! -f "$CONFIG_FILE" ]]; then
+  echo "Error: config.toml not found. Copy config.example.toml to config.toml and fill in values." >&2
+  exit 1
+fi
+
+toml_parse "$CONFIG_FILE"
+
+ACTIVE_PROJECT="$(toml_get "active_project")"
+ACTIVE_ENV="$(toml_get "active_env")"
+DEFAULT_TOKEN="$(toml_get "default_token")"
+AGENT_MARKER="$(toml_get "agent_marker")"
+[[ -z "$AGENT_MARKER" ]] && AGENT_MARKER="[agent-test]"
+
+cfg_get() {
+  toml_get "projects.${ACTIVE_PROJECT}.envs.${ACTIVE_ENV}.${1}"
+}
+
+API_BASE="$(cfg_get "api_base")"
+API_MODE="$(cfg_get "api_mode")"
+TOKEN_VALUE="$(cfg_get "tokens.${DEFAULT_TOKEN}")"
+
+if [[ -z "$API_BASE" ]]; then
+  echo "Error: api_base not set for project=$ACTIVE_PROJECT env=$ACTIVE_ENV" >&2
+  exit 1
+fi
+if [[ -z "$TOKEN_VALUE" ]]; then
+  echo "Error: token '$DEFAULT_TOKEN' not found for project=$ACTIVE_PROJECT env=$ACTIVE_ENV" >&2
+  exit 1
+fi
+if [[ -z "$API_MODE" ]]; then
+  echo "Error: api_mode not set for project=$ACTIVE_PROJECT env=$ACTIVE_ENV" >&2
+  exit 1
+fi
+
+# ── Logging ───────────────────────────────────────────────────────────
+mkdir -p "$LOGS_DIR"
+LOG_FILE="$LOGS_DIR/${ACTIVE_PROJECT}-${ACTIVE_ENV}.log"
+CREATED_LOG="$LOGS_DIR/${ACTIVE_PROJECT}-${ACTIVE_ENV}-created.jsonl"
+
+log_call() {
+  local method="$1" path="$2" status="$3"
+  local ts
+  ts="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  printf '[%s] %s %s -> %s (mode=%s)\n' "$ts" "$method" "$path" "$status" "$API_MODE" >> "$LOG_FILE"
+}
+
+log_created() {
+  local method="$1" path="$2" id="$3"
+  local ts
+  ts="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  printf '{"method":"%s","path":"%s","id":"%s","ts":"%s"}\n' "$method" "$path" "$id" "$ts" >> "$CREATED_LOG"
+}
+
+# ── Input Validation ──────────────────────────────────────────────────
+usage() {
+  cat <<EOF
+Usage: ./curl <METHOD> <path> [extra-curl-args...]
+
+Methods: GET, POST, PUT, PATCH, DELETE
+Path must be relative (e.g., /users, not https://...)
+
+Active: project=$ACTIVE_PROJECT env=$ACTIVE_ENV mode=$API_MODE
+EOF
+  exit 1
+}
+
+if [[ $# -lt 2 ]]; then
+  usage
+fi
+
+METHOD="$(echo "$1" | tr '[:lower:]' '[:upper:]')"
+PATH_ARG="$2"
+shift 2
+EXTRA_ARGS=("$@")
+
+# Validate method
+case "$METHOD" in
+  GET|POST|PUT|PATCH|DELETE) ;;
+  *) echo "Error: Unsupported method '$METHOD'. Use GET, POST, PUT, PATCH, or DELETE." >&2; exit 1 ;;
+esac
+
+# Reject full URLs
+if [[ "$PATH_ARG" =~ ^https?:// ]]; then
+  echo "Error: Use relative paths (e.g., /users), not full URLs." >&2
+  echo "The api_base ($API_BASE) is prepended automatically." >&2
+  exit 1
+fi
+
+# Ensure path starts with /
+[[ "$PATH_ARG" != /* ]] && PATH_ARG="/$PATH_ARG"
+
+# Reject custom Authorization headers in extra args
+for arg in "${EXTRA_ARGS[@]}"; do
+  if [[ "$(echo "$arg" | tr '[:upper:]' '[:lower:]')" =~ ^authorization: ]]; then
+    echo "Error: Custom Authorization headers are not allowed. The token is set via config.toml." >&2
+    exit 1
+  fi
+done
+# Also check if -H is followed by an Authorization header
+local_args=("${EXTRA_ARGS[@]}")
+for ((i=0; i<${#local_args[@]}; i++)); do
+  if [[ "${local_args[$i]}" == "-H" || "${local_args[$i]}" == "--header" ]]; then
+    next_idx=$((i+1))
+    if [[ $next_idx -lt ${#local_args[@]} ]]; then
+      if [[ "$(echo "${local_args[$next_idx]}" | tr '[:upper:]' '[:lower:]')" =~ ^authorization: ]]; then
+        echo "Error: Custom Authorization headers are not allowed. The token is set via config.toml." >&2
+        exit 1
+      fi
+    fi
+  fi
+done
+
+# ── Extract request body from extra args ──────────────────────────────
+extract_body() {
+  for ((i=0; i<${#EXTRA_ARGS[@]}; i++)); do
+    case "${EXTRA_ARGS[$i]}" in
+      -d|--data|--data-raw|--data-binary|--data-ascii)
+        local next_idx=$((i+1))
+        if [[ $next_idx -lt ${#EXTRA_ARGS[@]} ]]; then
+          printf '%s' "${EXTRA_ARGS[$next_idx]}"
+          return
+        fi
+        ;;
+      -d*) printf '%s' "${EXTRA_ARGS[$i]#-d}"; return ;;
+      --data=*) printf '%s' "${EXTRA_ARGS[$i]#--data=}"; return ;;
+      --data-raw=*) printf '%s' "${EXTRA_ARGS[$i]#--data-raw=}"; return ;;
+    esac
+  done
+}
+
+# ── Safety Enforcement ────────────────────────────────────────────────
+enforce_safety() {
+  local method="$1"
+
+  case "$API_MODE" in
+    read-only)
+      if [[ "$method" != "GET" ]]; then
+        printf '%bBLOCKED:%b %s is not allowed in read-only mode.\n' "$RED" "$RESET" "$method" >&2
+        printf 'Only GET requests are permitted for env=%s.\n' "$ACTIVE_ENV" >&2
+        exit 1
+      fi
+      ;;
+
+    safe-updates)
+      if [[ "$method" == "DELETE" ]]; then
+        printf '%bBLOCKED:%b DELETE is not allowed in safe-updates mode.\n' "$RED" "$RESET" >&2
+        printf 'Use read-only endpoints or switch to full-access mode.\n' >&2
+        exit 1
+      fi
+      if [[ "$method" == "POST" || "$method" == "PUT" || "$method" == "PATCH" ]]; then
+        local body
+        body="$(extract_body)"
+        if [[ -z "$body" ]]; then
+          printf '%bBLOCKED:%b %s requires a request body with the agent marker "%s" in safe-updates mode.\n' "$RED" "$RESET" "$method" "$AGENT_MARKER" >&2
+          exit 1
+        fi
+        if [[ "$body" != *"$AGENT_MARKER"* ]]; then
+          printf '%bBLOCKED:%b Request body must contain the agent marker "%s" in safe-updates mode.\n' "$RED" "$RESET" "$AGENT_MARKER" >&2
+          printf 'This ensures agent-created resources are tagged for easy identification and cleanup.\n' >&2
+          printf 'Example: -d '\''{"name": "%s My Resource"}'\'' \n' "$AGENT_MARKER" >&2
+          exit 1
+        fi
+      fi
+      ;;
+
+    full-access)
+      if [[ "$method" == "DELETE" ]]; then
+        # Extract the resource ID (last path segment)
+        local resource_id
+        resource_id="${PATH_ARG##*/}"
+        if [[ -z "$resource_id" || "$resource_id" == "$PATH_ARG" ]]; then
+          printf '%bBLOCKED:%b DELETE requires a resource ID in the path (e.g., /users/123).\n' "$RED" "$RESET" >&2
+          exit 1
+        fi
+        # Check if this ID exists in our creation log
+        if [[ ! -f "$CREATED_LOG" ]]; then
+          printf '%bBLOCKED:%b No creation log found. You can only DELETE resources created by this agent.\n' "$RED" "$RESET" >&2
+          printf 'Create resources with POST first, then delete them by their logged ID.\n' >&2
+          exit 1
+        fi
+        if ! grep -q "\"id\":\"${resource_id}\"" "$CREATED_LOG" 2>/dev/null; then
+          printf '%bBLOCKED:%b Resource ID "%s" was not created by this agent.\n' "$RED" "$RESET" "$resource_id" >&2
+          printf 'You can only DELETE resources logged in %s.\n' "$CREATED_LOG" >&2
+          printf 'Deletable IDs:\n' >&2
+          if [[ -f "$CREATED_LOG" ]]; then
+            jq -r '"  \(.method) \(.path) -> id=\(.id) (created \(.ts))"' "$CREATED_LOG" 2>/dev/null >&2 || true
+          fi
+          exit 1
+        fi
+      fi
+      ;;
+
+    *)
+      echo "Error: Unknown api_mode '$API_MODE'. Use read-only, safe-updates, or full-access." >&2
+      exit 1
+      ;;
+  esac
+}
+
+enforce_safety "$METHOD"
+
+# ── Build and Execute curl ────────────────────────────────────────────
+FULL_URL="${API_BASE}${PATH_ARG}"
+
+CURL_ARGS=(
+  -s
+  -w '\n%{http_code}'
+  -X "$METHOD"
+  -H "Authorization: Bearer $TOKEN_VALUE"
+)
+
+# Add Content-Type for non-GET
+if [[ "$METHOD" != "GET" ]]; then
+  CURL_ARGS+=(-H "Content-Type: application/json")
+fi
+
+# Append extra args
+CURL_ARGS+=("${EXTRA_ARGS[@]}")
+
+# Add URL last
+CURL_ARGS+=("$FULL_URL")
+
+# Execute
+RESPONSE=$(command curl "${CURL_ARGS[@]}" 2>/dev/null) || {
+  echo "Error: curl request failed (network error or unreachable host)" >&2
+  log_call "$METHOD" "$PATH_ARG" "NETWORK_ERROR"
+  exit 1
+}
+
+# Split response body and status code
+HTTP_STATUS="${RESPONSE##*$'\n'}"
+BODY="${RESPONSE%$'\n'*}"
+
+# Log the call
+log_call "$METHOD" "$PATH_ARG" "$HTTP_STATUS"
+
+# Display status with color
+status_color="$GREEN"
+if [[ "$HTTP_STATUS" =~ ^4 ]]; then
+  status_color="$YELLOW"
+elif [[ "$HTTP_STATUS" =~ ^5 ]]; then
+  status_color="$RED"
+fi
+
+printf '%bHTTP %s%b %s %s\n' "$status_color" "$HTTP_STATUS" "$RESET" "$METHOD" "$PATH_ARG"
+
+# Pretty-print body if it's JSON
+if printf '%s' "$BODY" | jq empty 2>/dev/null; then
+  printf '%s' "$BODY" | jq .
+else
+  printf '%s\n' "$BODY"
+fi
+
+# ── Post-request: track created resources (full-access mode) ──────────
+if [[ "$API_MODE" == "full-access" && "$METHOD" == "POST" && "$HTTP_STATUS" =~ ^2 ]]; then
+  # Try to extract id or _id from response
+  created_id=""
+  if printf '%s' "$BODY" | jq empty 2>/dev/null; then
+    created_id=$(printf '%s' "$BODY" | jq -r '.id // ._id // empty' 2>/dev/null)
+  fi
+  if [[ -n "$created_id" ]]; then
+    log_created "$METHOD" "$PATH_ARG" "$created_id"
+    printf '%bCreated resource logged:%b id=%s\n' "$DIM" "$RESET" "$created_id"
+  fi
+fi

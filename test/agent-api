@@ -1,0 +1,36 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+BIN_DIR="$SCRIPT_DIR/.agent-api/bin"
+BIN_PATH="$BIN_DIR/agent-api"
+LOCK_DIR="$BIN_DIR/.build-lock"
+
+needs_build=0
+if [[ ! -x "$BIN_PATH" ]]; then
+  needs_build=1
+elif [[ "$SCRIPT_DIR/go.mod" -nt "$BIN_PATH" ]]; then
+  needs_build=1
+elif find "$SCRIPT_DIR/cmd" "$SCRIPT_DIR/internal" -type f -newer "$BIN_PATH" | grep -q .; then
+  needs_build=1
+fi
+
+if [[ $needs_build -eq 1 ]]; then
+  mkdir -p "$BIN_DIR"
+  while ! mkdir "$LOCK_DIR" 2>/dev/null; do
+    sleep 0.05
+  done
+  trap 'rmdir "$LOCK_DIR" 2>/dev/null || true' EXIT
+
+  # Another process might have already built while we waited for the lock.
+  if [[ ! -x "$BIN_PATH" ]] || [[ "$SCRIPT_DIR/go.mod" -nt "$BIN_PATH" ]] || find "$SCRIPT_DIR/cmd" "$SCRIPT_DIR/internal" -type f -newer "$BIN_PATH" | grep -q .; then
+    TMP_BIN="$BIN_PATH.tmp.$$"
+    (cd "$SCRIPT_DIR" && go build -o "$TMP_BIN" ./cmd/agent-api)
+    mv "$TMP_BIN" "$BIN_PATH"
+  fi
+
+  rmdir "$LOCK_DIR" 2>/dev/null || true
+  trap - EXIT
+fi
+
+exec "$BIN_PATH" "$@"

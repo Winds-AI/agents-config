@@ -1,0 +1,52 @@
+# Agent API Toolkit - Configuration
+#
+# Copy this file to config.toml and fill in real values.
+# config.toml is gitignored and should never be committed.
+
+# Which project and environment to use by default
+active_project = "myproject"
+active_env = "dev"
+
+# Default token name (must match a key under [projects.<name>.envs.<env>.tokens])
+default_token = "dev_superuser"
+
+# Marker string that must appear in POST/PUT/PATCH request bodies in safe-updates mode.
+# This lets you tag agent-created resources for easy cleanup.
+agent_marker = "[agent-test]"
+
+# --- Project: myproject ---
+
+[projects.myproject.envs.local]
+api_base = "http://localhost:3000/api"
+api_mode = "safe-updates"          # read-only | safe-updates | full-access
+openapi_url = "http://localhost:3000/api/swagger-json"
+
+[projects.myproject.envs.local.tokens]
+dev_superuser = "<token>"
+
+[projects.myproject.envs.dev]
+api_base = "https://dev.example.com/api"
+api_mode = "safe-updates"
+openapi_url = "https://dev.example.com/api/swagger-json"
+
+[projects.myproject.envs.dev.tokens]
+dev_superuser = "<token>"
+dev_user = "<token>"
+
+[projects.myproject.envs.staging]
+api_base = "https://staging.example.com/api"
+api_mode = "read-only"
+openapi_url = "https://staging.example.com/api/swagger-json"
+
+[projects.myproject.envs.staging.tokens]
+dev_superuser = "<token>"
+
+# --- Project: another ---
+
+[projects.another.envs.dev]
+api_base = "https://dev.another.com/api"
+api_mode = "read-only"
+openapi_url = "https://dev.another.com/api/swagger-json"
+
+[projects.another.envs.dev.tokens]
+main_token = "<token>"
