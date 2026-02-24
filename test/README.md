@@ -1,6 +1,12 @@
-# agent-api (V1)
+# agent-api (Go, V1)
 
-Policy-enforced CLI for agent API discovery and calls using the existing TOML format.
+Policy-enforced CLI for API discovery and API calls using the existing TOML config format.
+
+## Runtime
+
+1. Go-based implementation.
+2. Use `./agent-api` as the entrypoint.
+3. The launcher auto-builds the binary into `.agent-api/bin/agent-api` when needed.
 
 ## Core Rules
 
@@ -16,10 +22,10 @@ Copy and fill:
 cp config.example.toml config.toml
 ```
 
-The CLI reads:
+Config resolution order:
 
-1. `./config.toml` if present
-2. Otherwise `./config.example.toml`
+1. `./config.toml`
+2. `./config.example.toml`
 
 You can override with `--config <path>`.
 
@@ -39,14 +45,16 @@ You can override with `--config <path>`.
 
 ## Safety Enforcement
 
-1. `read-only`: only `GET`, `HEAD`, `OPTIONS`.
+1. `read-only`: allows only `GET`, `HEAD`, `OPTIONS`.
 2. `safe-updates`: allows `POST`, `PUT`, `PATCH`; blocks `DELETE`; write JSON must include `[agent-test]` in all string fields.
 3. `full-access`: allows all methods; `DELETE` requires `--confirm-delete`.
 
-## Dev
+## Development
 
-Run tests:
+Build/package validation:
 
 ```bash
 go test ./...
 ```
+
+Note: there are currently no `_test.go` files, so this command is used as a compile/package check.
