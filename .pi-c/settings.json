@@ -1,10 +1,10 @@
 {
     "extensions": [
-        ".pi/extensions/ask-user-question.ts",
-        "./.pi/extensions/memory-monitor.ts",
-        "./.pi/extensions/kittentts/index.ts",
-        "./.pi/extensions/verbalized-sampling/verbalized-sampling.ts",
-        "./.pi-c/extensions/command-approval-gate.ts"
+        "./.pi-c/extensions/ask-user-question.ts",
+        "./.pi-c/extensions/memory-monitor.ts",
+        "./.pi-c/extensions/kittentts/index.ts",
+        "./.pi-c/extensions/verbalized-sampling/verbalized-sampling.ts",
+        "./.pi-c/extensions/command-approval-gate.ts",
+        "./.pi-c/extensions/workflow-orchestrator/index.ts"
     ]
 }
-
