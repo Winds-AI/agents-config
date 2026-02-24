@@ -1,0 +1,7 @@
+# Minimal CPU-only runtime for KittenTTS ONNX models.
+numpy>=1.26
+onnxruntime>=1.18
+soundfile>=0.12
+huggingface_hub>=0.23
+phonemizer-fork>=3.3.2
+espeakng-loader>=0.2.4

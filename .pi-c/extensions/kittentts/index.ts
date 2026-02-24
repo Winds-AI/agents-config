@@ -241,7 +241,7 @@ export default function kittenTts(pi: ExtensionAPI) {
 				const event = JSON.parse(line) as WorkerEvent;
 				handleWorkerEvent(event);
 			} catch {
-				// Known KittenTTS informational line; ignore to avoid protocol noise.
+				// Ignore known worker protocol noise if it appears.
 				if (line.startsWith("Audio saved to ")) {
 					continue;
 				}
@@ -469,12 +469,15 @@ export default function kittenTts(pi: ExtensionAPI) {
 	};
 
 	const checkDependencies = async (): Promise<boolean> => {
-		const result = await pi.exec(PYTHON_BIN, ["-c", "import kittentts"]);
+		const result = await pi.exec(PYTHON_BIN, [
+			"-c",
+			"import espeakng_loader, numpy, onnxruntime, soundfile, huggingface_hub, phonemizer",
+		]);
 		if (result.code !== 0) {
 			available = false;
 			updateStatus();
 			notify(
-				`KittenTTS not installed for ${PYTHON_BIN}. See kittentts README for venv install steps.`,
+				`KittenTTS CPU dependencies missing for ${PYTHON_BIN}. Install .pi/extensions/kittentts/requirements-cpu.txt`,
 				"warning",
 			);
 			return false;

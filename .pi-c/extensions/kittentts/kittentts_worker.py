@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Persistent KittenTTS worker for Pi extension.
+Persistent KittenTTS ONNX worker for Pi extension.
 
 Protocol: JSON lines over stdin/stdout.
 Input:
@@ -21,11 +21,10 @@ Output events:
 from __future__ import annotations
 
 import argparse
-import contextlib
-import io
 import json
 import os
 import queue
+import re
 import shutil
 import subprocess
 import sys
@@ -36,18 +35,211 @@ from dataclasses import dataclass
 from typing import Optional
 
 # ============================================================================
-# Configuration (can be overridden by CLI args)
+# Configuration (can be overridden by CLI args/environment)
 # ============================================================================
 
-DEFAULT_MODEL_REPO_ID = "KittenML/kitten-tts-mini-0.8"
+DEFAULT_MODEL_REPO_ID = "KittenML/kitten-tts-micro-0.8"
 DEFAULT_PLAYER_PRIORITY = ("pw-play", "paplay", "aplay")
+DEFAULT_SAMPLE_RATE = 24000
+DEFAULT_MAX_TEXT_CHUNK = 400
+DEFAULT_TAIL_TRIM_SAMPLES = 5000
+DEFAULT_ORT_INTRA_THREADS = max(1, min(os.cpu_count() or 1, 8))
+DEFAULT_ORT_INTER_THREADS = 1
 
+TOKEN_RE = re.compile(r"\w+|[^\w\s]")
+SENTENCE_SPLIT_RE = re.compile(r"[.!?]+")
+
+IMPORT_ERROR: Optional[Exception] = None
 try:
-    from kittentts import KittenTTS
-    IMPORT_ERROR: Optional[Exception] = None
+    import espeakng_loader
+    import numpy as np
+    import onnxruntime as ort
+    import soundfile as sf
+    from huggingface_hub import hf_hub_download
+    from phonemizer.backend import EspeakBackend
+    from phonemizer.backend.espeak.wrapper import EspeakWrapper
 except Exception as exc:
-    KittenTTS = None  # type: ignore[assignment]
     IMPORT_ERROR = exc
+
+
+class TextCleaner:
+    def __init__(self) -> None:
+        symbols = (
+            ["$"]
+            + list(';:,.!?¡¿—…"«»"" ')
+            + list("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz")
+            + list(
+                "ɑɐɒæɓʙβɔɕçɗɖðʤəɘɚɛɜɝɞɟʄɡɠɢʛɦɧħɥʜɨɪʝɭɬɫɮʟɱɯɰŋɳɲɴøɵɸθœɶʘɹɺɾɻʀʁɽʂʃʈʧʉʊʋⱱʌɣɤʍχʎʏʑʐʒʔʡʕʢǀǁǂǃˈˌːˑʼʴʰʱʲʷˠˤ˞↓↑→↗↘'̩'ᵻ"
+            )
+        )
+        self.word_index_dictionary = {symbol: idx for idx, symbol in enumerate(symbols)}
+
+    def __call__(self, text: str) -> list[int]:
+        return [self.word_index_dictionary[char] for char in text if char in self.word_index_dictionary]
+
+
+def basic_english_tokenize(text: str) -> list[str]:
+    return TOKEN_RE.findall(text)
+
+
+def ensure_punctuation(text: str) -> str:
+    cleaned = text.strip()
+    if not cleaned:
+        return cleaned
+    if cleaned[-1] not in ".!?,;:":
+        cleaned += ","
+    return cleaned
+
+
+def chunk_text(text: str, max_len: int = DEFAULT_MAX_TEXT_CHUNK) -> list[str]:
+    chunks: list[str] = []
+    for sentence in SENTENCE_SPLIT_RE.split(text):
+        sentence = sentence.strip()
+        if not sentence:
+            continue
+        if len(sentence) <= max_len:
+            chunks.append(ensure_punctuation(sentence))
+            continue
+
+        temp_chunk = ""
+        for word in sentence.split():
+            if len(temp_chunk) + len(word) + 1 <= max_len:
+                temp_chunk += f" {word}" if temp_chunk else word
+                continue
+
+            if temp_chunk:
+                chunks.append(ensure_punctuation(temp_chunk.strip()))
+            temp_chunk = word
+
+        if temp_chunk:
+            chunks.append(ensure_punctuation(temp_chunk.strip()))
+
+    return chunks
+
+
+def read_env_int(name: str, fallback: int, min_value: int = 1) -> int:
+    raw = os.environ.get(name)
+    if raw is None:
+        return fallback
+    try:
+        value = int(raw)
+    except ValueError:
+        return fallback
+    return max(min_value, value)
+
+
+class KittenOnnxModel:
+    def __init__(self, model_repo_id: str, cache_dir: Optional[str] = None) -> None:
+        config_path = hf_hub_download(repo_id=model_repo_id, filename="config.json", cache_dir=cache_dir)
+        with open(config_path, encoding="utf-8") as f:
+            config = json.load(f)
+
+        if config.get("type") not in {"ONNX1", "ONNX2"}:
+            raise ValueError(f"Unsupported model type: {config.get('type')}")
+
+        model_path = hf_hub_download(repo_id=model_repo_id, filename=config["model_file"], cache_dir=cache_dir)
+        voices_path = hf_hub_download(repo_id=model_repo_id, filename=config["voices"], cache_dir=cache_dir)
+
+        self.voice_aliases = {str(k): str(v) for k, v in config.get("voice_aliases", {}).items()}
+        self.speed_priors = {str(k): float(v) for k, v in config.get("speed_priors", {}).items()}
+        self.voices = self._load_voices(voices_path)
+        self.available_voices = tuple(sorted(self.voices.keys()))
+        self.text_cleaner = TextCleaner()
+        self.phonemizer = self._build_phonemizer()
+        self.session = self._build_session(model_path)
+
+    def _build_phonemizer(self) -> EspeakBackend:
+        EspeakWrapper.set_library(espeakng_loader.get_library_path())
+        data_path = espeakng_loader.get_data_path()
+        if hasattr(EspeakWrapper, "set_data_path"):
+            EspeakWrapper.set_data_path(data_path)
+        else:
+            setattr(EspeakWrapper, "data_path", data_path)
+
+        return EspeakBackend(language="en-us", preserve_punctuation=True, with_stress=True)
+
+    def _build_session(self, model_path: str) -> ort.InferenceSession:
+        intra_threads = read_env_int("KITTENTTS_ORT_INTRA_THREADS", DEFAULT_ORT_INTRA_THREADS)
+        inter_threads = read_env_int("KITTENTTS_ORT_INTER_THREADS", DEFAULT_ORT_INTER_THREADS)
+
+        session_options = ort.SessionOptions()
+        session_options.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
+        session_options.intra_op_num_threads = intra_threads
+        session_options.inter_op_num_threads = inter_threads
+
+        return ort.InferenceSession(
+            model_path,
+            sess_options=session_options,
+            providers=["CPUExecutionProvider"],
+        )
+
+    def _load_voices(self, voices_path: str) -> dict[str, np.ndarray]:
+        voices_npz = np.load(voices_path)
+        voices: dict[str, np.ndarray] = {}
+        try:
+            for voice_name in voices_npz.files:
+                voices[voice_name] = np.asarray(voices_npz[voice_name], dtype=np.float32)
+        finally:
+            voices_npz.close()
+        if not voices:
+            raise ValueError("Model voices file did not contain any voice embeddings")
+        return voices
+
+    def _resolve_voice(self, voice: str) -> str:
+        resolved = self.voice_aliases.get(voice, voice)
+        if resolved not in self.voices:
+            raise ValueError(f"Voice '{voice}' not available. Choices: {', '.join(self.available_voices)}")
+        return resolved
+
+    def _effective_speed(self, voice: str, speed: float) -> float:
+        prior = self.speed_priors.get(voice, 1.0)
+        return float(speed) * prior
+
+    def _prepare_inputs(self, text: str, voice: str, speed: float) -> dict[str, np.ndarray]:
+        resolved_voice = self._resolve_voice(voice)
+        effective_speed = self._effective_speed(resolved_voice, speed)
+
+        phoneme_items = self.phonemizer.phonemize([text])
+        if not phoneme_items:
+            raise ValueError("Phonemizer returned no output")
+        phoneme_text = " ".join(basic_english_tokenize(phoneme_items[0]))
+        tokens = self.text_cleaner(phoneme_text)
+        if not tokens:
+            raise ValueError("No valid tokens were produced for input text")
+
+        tokens.insert(0, 0)
+        tokens.append(0)
+        input_ids = np.array([tokens], dtype=np.int64)
+
+        voice_matrix = self.voices[resolved_voice]
+        ref_id = min(len(text), voice_matrix.shape[0] - 1)
+        style = voice_matrix[ref_id : ref_id + 1]
+
+        return {
+            "input_ids": input_ids,
+            "style": style,
+            "speed": np.array([effective_speed], dtype=np.float32),
+        }
+
+    def _generate_single_chunk(self, text: str, voice: str, speed: float) -> np.ndarray:
+        onnx_inputs = self._prepare_inputs(text, voice, speed)
+        outputs = self.session.run(None, onnx_inputs)
+        if not outputs:
+            raise RuntimeError("Model inference returned no outputs")
+
+        waveform = np.asarray(outputs[0], dtype=np.float32).reshape(-1)
+        if waveform.shape[-1] > DEFAULT_TAIL_TRIM_SAMPLES:
+            waveform = waveform[:-DEFAULT_TAIL_TRIM_SAMPLES]
+        return waveform
+
+    def generate_to_file(self, text: str, output_path: str, voice: str, speed: float) -> None:
+        text_chunks = chunk_text(text)
+        if not text_chunks:
+            raise ValueError("Cannot synthesize empty text")
+
+        audio_chunks = [self._generate_single_chunk(chunk, voice, speed) for chunk in text_chunks]
+        audio = np.concatenate(audio_chunks, axis=-1).astype(np.float32, copy=False)
+        sf.write(output_path, audio, DEFAULT_SAMPLE_RATE)
 
 
 @dataclass
@@ -99,7 +291,7 @@ def bump_generation() -> int:
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Persistent KittenTTS worker")
+    parser = argparse.ArgumentParser(description="Persistent KittenTTS ONNX worker")
     parser.add_argument("--model", default=DEFAULT_MODEL_REPO_ID, help="Hugging Face model repo ID")
     parser.add_argument(
         "--players",
@@ -124,7 +316,7 @@ def safe_unlink(path: str) -> None:
         pass
 
 
-def synth_loop(model: KittenTTS) -> None:
+def synth_loop(model: KittenOnnxModel) -> None:
     while not stop_event.is_set():
         try:
             job = plan_queue.get(timeout=0.2)
@@ -149,9 +341,7 @@ def synth_loop(model: KittenTTS) -> None:
             os.close(fd)
 
             synth_start = time.perf_counter()
-            # Keep stdout/stderr JSON-only for parent protocol handling.
-            with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
-                model.generate_to_file(job.text, wav_path, job.voice, job.speed)
+            model.generate_to_file(job.text, wav_path, job.voice, job.speed)
             synth_ms = int((time.perf_counter() - synth_start) * 1000)
 
             emit({"type": "synth_done", "id": job.chunk_id, "synth_ms": synth_ms})
@@ -286,7 +476,10 @@ def main() -> int:
         emit(
             {
                 "type": "fatal",
-                "message": f"KittenTTS import failed: {IMPORT_ERROR}. Install: pip install https://github.com/KittenML/KittenTTS/releases/download/0.8/kittentts-0.8.0-py3-none-any.whl",
+                "message": (
+                    "KittenTTS ONNX dependencies missing: "
+                    f"{IMPORT_ERROR}. Install: pip install -r .pi/extensions/kittentts/requirements-cpu.txt"
+                ),
             }
         )
         return 1
@@ -302,9 +495,9 @@ def main() -> int:
         return 1
 
     try:
-        model = KittenTTS(args.model)
+        model = KittenOnnxModel(args.model, cache_dir=os.environ.get("HF_HOME"))
     except Exception as exc:
-        emit({"type": "fatal", "message": f"Failed to load KittenTTS model: {exc}"})
+        emit({"type": "fatal", "message": f"Failed to load ONNX model: {exc}"})
         return 1
 
     synth_thread = threading.Thread(target=synth_loop, args=(model,), daemon=True)
