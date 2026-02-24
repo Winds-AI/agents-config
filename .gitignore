@@ -1,1 +1,8 @@
 external/
+
+# Virtual environments
+**/.venv/
+**/venv/
+
+# Hugging Face local model caches
+**/.hf-home/

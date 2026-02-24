@@ -16,6 +16,8 @@ const PYTHON_BIN = ".pi/extensions/kittentts/.venv/bin/python";
 const MODEL_REPO_ID = "KittenML/kitten-tts-micro-0.8";
 const PLAYER_PRIORITY = ["pw-play", "paplay", "aplay"];
 const HF_HOME = ".pi/extensions/kittentts/.hf-home";
+const ORT_INTRA_THREADS = 5; // i5-10400 starting point
+const ORT_INTER_THREADS = 1;
 const DEFAULT_VOICE = "Jasper";
 const SPEECH_PLANNER_ENABLED = true;
 const CODE_SPEECH_POLICY = "summarize"; // summarize | short | verbatim
@@ -105,6 +107,14 @@ Set at runtime:
 - `/tts on` enables
 - `/tts off` disables and clears queue
 - `/tts voice <name>` sets voice
+- `/tts stats` shows latency stats (last + average synth/play and RTF)
+- `/tts stats reset` resets collected stats
+
+## Status Line
+
+The Pi footer status now shows live telemetry:
+- While speaking: last synth/play latency and real-time factor (`rtf = synth_ms / play_ms`)
+- While idle: rolling average synth/play latency and average RTF
 
 ## Quick Checks
 
@@ -125,11 +135,11 @@ If you see HF rate-limit warnings, set `HF_TOKEN` in your shell environment.
 
 ## Performance Tuning (CPU)
 
-Set ONNX Runtime threading in your shell before starting Pi:
+Set ONNX Runtime threading directly in `.pi/extensions/kittentts/index.ts`:
 
-```bash
-export KITTENTTS_ORT_INTRA_THREADS=4
-export KITTENTTS_ORT_INTER_THREADS=1
+```ts
+const ORT_INTRA_THREADS = 5;
+const ORT_INTER_THREADS = 1;
 ```
 
 For slower CPUs, `KittenML/kitten-tts-nano-0.8-int8` is usually faster than `micro`.

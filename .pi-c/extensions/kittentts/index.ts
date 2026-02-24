@@ -30,6 +30,12 @@ const PLAYER_PRIORITY = ["pw-play", "paplay", "aplay"];
 /** Hugging Face cache home for model downloads */
 const HF_HOME = ".pi/extensions/kittentts/.hf-home";
 
+/** ONNX Runtime CPU threads within one operator (set >0, e.g. 5 for i5-10400) */
+const ORT_INTRA_THREADS = 5;
+
+/** ONNX Runtime CPU threads across operators (usually keep at 1) */
+const ORT_INTER_THREADS = 1;
+
 /** Default voice alias (resolved by model voice_aliases) */
 const DEFAULT_VOICE = "Jasper";
 
@@ -37,7 +43,7 @@ const DEFAULT_VOICE = "Jasper";
 const KNOWN_VOICES = ["Bella", "Jasper", "Luna", "Bruno", "Rosie", "Hugo", "Kiki", "Leo"];
 
 /** Speech speed passed to KittenTTS */
-const DEFAULT_SPEED = 1.0;
+const DEFAULT_SPEED = 1.2;
 
 /** Worker startup readiness timeout */
 const WORKER_READY_TIMEOUT_MS = 10000;
@@ -72,6 +78,18 @@ type WorkerEvent =
 	| { type: "fatal"; message?: string }
 	| { type: "cleared"; generation?: number };
 
+interface LatencyStats {
+	samples: number;
+	totalSynthMs: number;
+	totalPlayMs: number;
+	totalRatio: number;
+	lastSynthMs?: number;
+	lastPlayMs?: number;
+	lastRatio?: number;
+	peakQueue: number;
+	errors: number;
+}
+
 const extensionDir = dirname(fileURLToPath(import.meta.url));
 const workerPath = join(extensionDir, "kittentts_worker.py");
 
@@ -87,6 +105,14 @@ export default function kittenTts(pi: ExtensionAPI) {
 	let pending = new Map<string, true>();
 	let readyTimer: ReturnType<typeof setTimeout> | null = null;
 	let lastCtx: ExtensionContext | null = null;
+	let stats: LatencyStats = {
+		samples: 0,
+		totalSynthMs: 0,
+		totalPlayMs: 0,
+		totalRatio: 0,
+		peakQueue: 0,
+		errors: 0,
+	};
 
 	const rememberContext = (ctx: ExtensionContext) => {
 		lastCtx = ctx;
@@ -104,6 +130,64 @@ export default function kittenTts(pi: ExtensionAPI) {
 		}
 	};
 
+	const resetStats = () => {
+		stats = {
+			samples: 0,
+			totalSynthMs: 0,
+			totalPlayMs: 0,
+			totalRatio: 0,
+			peakQueue: 0,
+			errors: 0,
+		};
+	};
+
+	const averageSynthMs = () => (stats.samples > 0 ? stats.totalSynthMs / stats.samples : undefined);
+	const averagePlayMs = () => (stats.samples > 0 ? stats.totalPlayMs / stats.samples : undefined);
+	const averageRatio = () => (stats.samples > 0 ? stats.totalRatio / stats.samples : undefined);
+
+	const formatMs = (value?: number) => (typeof value === "number" ? `${Math.round(value)}ms` : "-");
+	const formatRatio = (value?: number) => (typeof value === "number" ? value.toFixed(2) : "-");
+
+	const updatePeakQueue = () => {
+		if (pending.size > stats.peakQueue) {
+			stats.peakQueue = pending.size;
+		}
+	};
+
+	const recordLatency = (synthMs?: number, playMs?: number) => {
+		if (typeof synthMs !== "number" || typeof playMs !== "number" || playMs <= 0) {
+			return;
+		}
+		const ratio = synthMs / playMs;
+		stats.samples += 1;
+		stats.totalSynthMs += synthMs;
+		stats.totalPlayMs += playMs;
+		stats.totalRatio += ratio;
+		stats.lastSynthMs = synthMs;
+		stats.lastPlayMs = playMs;
+		stats.lastRatio = ratio;
+	};
+
+	const latencySuffix = (speaking: boolean): string => {
+		if (stats.samples <= 0) return "";
+		if (speaking) {
+			return ` | last ${formatMs(stats.lastSynthMs)}/${formatMs(stats.lastPlayMs)} rtf ${formatRatio(stats.lastRatio)}`;
+		}
+		return ` | avg ${formatMs(averageSynthMs())}/${formatMs(averagePlayMs())} rtf ${formatRatio(averageRatio())}`;
+	};
+
+	const statsSummary = (): string => {
+		if (stats.samples <= 0) {
+			return `TTS stats: samples=0, errors=${stats.errors}, peak_queue=${stats.peakQueue}, chunk_chars=${chunkChars}`;
+		}
+		return (
+			`TTS stats: samples=${stats.samples}, ` +
+			`last=${formatMs(stats.lastSynthMs)}/${formatMs(stats.lastPlayMs)} rtf=${formatRatio(stats.lastRatio)}, ` +
+			`avg=${formatMs(averageSynthMs())}/${formatMs(averagePlayMs())} rtf=${formatRatio(averageRatio())}, ` +
+			`errors=${stats.errors}, peak_queue=${stats.peakQueue}, chunk_chars=${chunkChars}`
+		);
+	};
+
 	const updateStatus = () => {
 		if (!enabled || !available || !worker) {
 			setStatus(undefined);
@@ -112,14 +196,14 @@ export default function kittenTts(pi: ExtensionAPI) {
 
 		const queued = pending.size;
 		if (queued <= 0) {
-			setStatus("TTS: idle");
+			setStatus(`TTS: idle${latencySuffix(false)}`);
 			return;
 		}
 		if (queued === 1) {
-			setStatus("TTS: speaking...");
+			setStatus(`TTS: speaking...${latencySuffix(true)}`);
 			return;
 		}
-		setStatus(`TTS: speaking... (${queued} queued)`);
+		setStatus(`TTS: speaking... (${queued} queued)${latencySuffix(true)}`);
 	};
 
 	const clearReadyTimer = () => {
@@ -196,6 +280,7 @@ export default function kittenTts(pi: ExtensionAPI) {
 
 		if (event.type === "play_done") {
 			pending.delete(event.id);
+			recordLatency(event.synth_ms, event.play_ms);
 			adjustChunkSize(event.synth_ms, event.play_ms);
 			updateStatus();
 			return;
@@ -211,6 +296,7 @@ export default function kittenTts(pi: ExtensionAPI) {
 			if (event.id) {
 				pending.delete(event.id);
 			}
+			stats.errors += 1;
 			updateStatus();
 			const stage = event.stage ? `${event.stage}: ` : "";
 			notify(`TTS error: ${stage}${event.message || "unknown error"}`, "warning");
@@ -255,19 +341,24 @@ export default function kittenTts(pi: ExtensionAPI) {
 		available = false;
 		workerBuffer = "";
 		pending.clear();
+		resetStats();
 		updateStatus();
 
 		try {
+			const workerEnv = {
+				...process.env,
+				HF_HOME: HF_HOME,
+				...(ORT_INTRA_THREADS > 0 ? { KITTENTTS_ORT_INTRA_THREADS: `${Math.round(ORT_INTRA_THREADS)}` } : {}),
+				...(ORT_INTER_THREADS > 0 ? { KITTENTTS_ORT_INTER_THREADS: `${Math.round(ORT_INTER_THREADS)}` } : {}),
+			};
+
 			worker = spawn(
 				PYTHON_BIN,
 				[workerPath, "--model", MODEL_REPO_ID, "--players", PLAYER_PRIORITY.join(",")],
 				{
 					stdio: ["pipe", "pipe", "pipe"],
 					shell: false,
-					env: {
-						...process.env,
-						HF_HOME: HF_HOME,
-					},
+					env: workerEnv,
 				},
 			);
 		} catch (err) {
@@ -420,6 +511,7 @@ export default function kittenTts(pi: ExtensionAPI) {
 		}
 		const chunkId = nextItemId();
 		pending.set(chunkId, true);
+		updatePeakQueue();
 		const ok = sendToWorker({
 			op: "speak",
 			id: chunkId,
@@ -445,6 +537,7 @@ export default function kittenTts(pi: ExtensionAPI) {
 		}
 		const chunkId = nextItemId();
 		pending.set(chunkId, true);
+		updatePeakQueue();
 		const ok = sendToWorker({
 			op: "pause",
 			id: chunkId,
@@ -540,7 +633,7 @@ export default function kittenTts(pi: ExtensionAPI) {
 	});
 
 	pi.registerCommand("tts", {
-		description: "Toggle TTS or set voice: /tts, /tts on|off, /tts voice <name>",
+		description: "Toggle TTS, set voice, or inspect stats: /tts, /tts on|off, /tts voice <name>, /tts stats",
 		handler: async (args: string, ctx: ExtensionCommandContext) => {
 			rememberContext(ctx);
 			const parts = args
@@ -593,7 +686,18 @@ export default function kittenTts(pi: ExtensionAPI) {
 				return;
 			}
 
-			notify("Usage: /tts, /tts on, /tts off, /tts voice <name>", "warning");
+			if (parts[0] === "stats") {
+				if (parts[1] === "reset") {
+					resetStats();
+					updateStatus();
+					notify("TTS stats reset", "info");
+					return;
+				}
+				notify(statsSummary(), "info");
+				return;
+			}
+
+			notify("Usage: /tts, /tts on, /tts off, /tts voice <name>, /tts stats [reset]", "warning");
 		},
 	});
 }
