@@ -19,7 +19,7 @@ Unclear requirements/API contract (param locations, mutation semantics, permissi
 
 1. Match numbers → run those steps only.
 2. Multiple steps → numerical order.
-3. Read step file before executing.
+3. Read step file before need and executing only.
 
 ## Combinations
 
@@ -32,6 +32,13 @@ Unclear requirements/API contract (param locations, mutation semantics, permissi
 
 | Resource               | Path                                    |
 | ---------------------- | --------------------------------------- |
-| API token usage        | `.agent/docs/API_SCRIPT_USAGE_GUIDE.md` |
+| API toolkit usage      | `.agent/docs/API_SCRIPT_USAGE_GUIDE.md` |
 | Plan template          | `.agent/docs/PLAN_TEMPLATE.md`          |
 | Browser automation     | `agent-browser` skill                   |
+
+## API Toolkit Context
+
+- Use prebuilt binaries directly:
+  - `./.agent/scripts/api` for OpenAPI discovery.
+  - `./.agent/scripts/acurl` for guarded API execution.
+- Do not change toolkit/config unless user explicitly asks.

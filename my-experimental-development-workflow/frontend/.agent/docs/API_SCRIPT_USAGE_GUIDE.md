@@ -1,32 +1,29 @@
-# API Scripts
+# API Toolkit (test3)
 
-Setup: `source .agent/scripts/api-env.sh` (once per session — loads config, adds scripts to PATH)
+Toolkit location: `.agent/scripts`
 
-## curl wrapper
+## Commands
 
-curl "/bandar-admin/discounts"
-curl -X POST -d '{"code":"X"}' "/bandar-admin/discounts"
+OpenAPI discovery:
 
-## api CLI (OpenAPI discovery)
+```bash
+./api find activity
+./api find "activity list" --method GET
+./api show listActivities
+./api show "GET /bandar-admin/activities"
+```
 
-api search <keyword>                  # find endpoints
-api detail <path> [method]            # full endpoint details + resolved schemas
-api schema <name>                     # inspect a component schema
-api example <path> [method]           # generate ready-to-run curl command
-api paths                             # list all paths
-api tags                              # list tags with endpoint counts
-api status                            # show active project/env/token/spec state
-api refresh                           # re-download spec
+API execution:
 
-## Response validation
+```bash
+./acurl /bandar-admin/activities
+./acurl GET /bandar-admin/activities?page=1&limit=10
+./acurl PATCH /bandar-admin/activities/{id}/status -d '{"note":"[agent-test]"}'
+```
 
-curl -s "<path>" | api validate <path> <METHOD> [--status 200]
+## Guardrails
 
-Output: `+` match, `x` mismatch, `?` nullable warning, `~` extra field.
-
-## Workflow
-
-1. api search
-2. api detail
-3. api example
-4. curl | api validate
+- `read-only`: allows `GET` only.
+- `safe-updates`: allows `GET, POST, PUT, PATCH`; write bodies must contain `agent_marker`.
+- `full-access`: allows all methods.
+- If `strict = true`, `acurl` validates method/path and required params against OpenAPI before execution.

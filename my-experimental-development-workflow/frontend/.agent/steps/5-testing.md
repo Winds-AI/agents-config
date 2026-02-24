@@ -32,4 +32,4 @@
 ## Boundaries
 
 - No code modifications. Report issues only.
-- No curl API calls.
+- No direct API calls in this step.

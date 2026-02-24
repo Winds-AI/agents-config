@@ -1,37 +1,56 @@
-# Agent API Configuration
+# Agent API Toolkit - Configuration
 #
-# Purpose:
-# - One file for API base URLs + tokens across projects/environments.
-# - Scripts read defaults from here and DO NOT allow per-call overrides.
-#
-# Setup:
-# - Copy this file to config.toml: cp config.example.toml config.toml
-# - Fill in your token values.
-#
-# Notes:
-# - Do not commit real production tokens. Keep this file scoped to dev/test.
-# - The curl wrapper will reject custom Authorization headers and URLs outside the active base.
+# Copy this file to config.toml and fill in real values.
+# config.toml is gitignored and should never be committed.
 
-# Active selection (used by scripts)
-active_project = "bandar"
+# Which project and environment to use by default
+active_project = "myproject"
 active_env = "dev"
+
+# Default token name (must match a key under [projects.<name>.envs.<env>.tokens])
 default_token = "dev_superuser"
 
-[projects.bandar.envs.dev]
-api_base = "<your-dev-api-base-url>"
-api_mode = "safe-updates" # read-only | safe-updates | full-access
-openapi_url = "<your-dev-openapi-json-url>"
+# Marker string that must appear in POST/PUT/PATCH request bodies in safe-updates mode.
+# This lets you tag agent-created resources for easy cleanup.
+agent_marker = "[agent-test]"
 
-[projects.bandar.envs.dev.tokens]
-dev_superuser = "<your-jwt-token-here>"
-dev_user = "<your-jwt-token-here>"
+# If true, acurl validates request method/path and required path/query params
+# against OpenAPI before sending the HTTP request.
+strict = false
 
+# --- Project: myproject ---
 
-[projects.bandar.envs.local]
-api_base = "http://localhost:7071/api"
+[projects.myproject.envs.local]
+api_base = "http://localhost:3000/api"
+api_mode = "safe-updates"          # read-only | safe-updates | full-access
+openapi_url = "http://localhost:3000/api/swagger-json"
+
+[projects.myproject.envs.local.tokens]
+dev_superuser = "<token>"
+
+[projects.myproject.envs.dev]
+api_base = "https://dev.example.com/api"
 api_mode = "safe-updates"
-openapi_url = "http://localhost:7071/api/<your-swagger-json-path>"
+openapi_url = "https://dev.example.com/api/swagger-json"
 
-[projects.bandar.envs.local.tokens]
-dev_superuser = "<your-jwt-token-here>"
-dev_user = "<your-jwt-token-here>"
+[projects.myproject.envs.dev.tokens]
+dev_superuser = "<token>"
+dev_user = "<token>"
+
+[projects.myproject.envs.staging]
+api_base = "https://staging.example.com/api"
+api_mode = "read-only"
+openapi_url = "https://staging.example.com/api/swagger-json"
+
+[projects.myproject.envs.staging.tokens]
+dev_superuser = "<token>"
+
+# --- Project: another ---
+
+[projects.another.envs.dev]
+api_base = "https://dev.another.com/api"
+api_mode = "read-only"
+openapi_url = "https://dev.another.com/api/swagger-json"
+
+[projects.another.envs.dev.tokens]
+main_token = "<token>"

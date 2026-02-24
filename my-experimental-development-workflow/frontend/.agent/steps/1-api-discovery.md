@@ -2,13 +2,13 @@
 
 ## Procedure
 
-1. From project root, source the API environment: `source .agent/scripts/api-env.sh`
-2. Search for relevant endpoints: `api search <keyword>`
-   - One broad query first (e.g., `api search certificate`)
+1. From project root, use toolkit binary: `./.agent/scripts/api`
+2. Search for relevant endpoints: `./.agent/scripts/api find <keyword>`
+   - One broad query first (e.g., `./.agent/scripts/api find certificate`)
    - Re-search only if 0 matches or specific endpoint missing
-3. Drill into each relevant endpoint: `api detail <path> [method]`
+3. Drill into each relevant endpoint: `./.agent/scripts/api show <operationId|"METHOD /path">`
    - Get full parameters, request body, response schemas
-4. Inspect specific schemas if needed: `api schema <SchemaName>`
+4. If endpoint ID/path is ambiguous, run a narrower `api find` query with `--method`.
 5. Scan existing API service files for overlap (see project patterns for API layer paths).
 6. Scan existing route constants for overlap.
 
