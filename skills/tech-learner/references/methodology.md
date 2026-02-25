@@ -11,18 +11,20 @@ Use this flow per concept. Compress steps for experienced learners.
 3. Before: old approach (or nearest equivalent) with short example.
 4. Pain: specific issues in the old approach.
 5. Solution: current approach, starting with smallest working snippet.
-6. Difference: side-by-side impact (correctness, DX, complexity, performance).
-7. Real-life example (optional): include only if it improves intuition.
-8. Behind the scenes (optional): only if `deepDive=always`, requested, or required for next concept.
-9. Thinking prompt: short understanding check.
-10. What's next: 2-3 choices with prerequisite notes.
+6. Jargon map: mention official technical terms used in the concept.
+7. Difference: side-by-side impact (correctness, DX, complexity, performance).
+8. Real-life example (optional): include only if it improves intuition.
+9. Behind the scenes (optional): only if `deepDive=always`, requested, or required for next concept.
+10. Thinking prompt: short understanding check.
+11. What's next: 2-3 choices with prerequisite notes.
 
 ## Core Snippet Pattern (FastAPI-Style)
 
 1. Show minimal runnable snippet.
 2. Explain important parts in labeled lines.
-3. Add one practical use case if needed.
-4. Expand only when asked.
+3. Mention new official terms in context.
+4. Add one practical use case if needed.
+5. Expand only when asked.
 
 Example:
 
@@ -49,20 +51,25 @@ Choice B: separate Y path first, then return to X.
 Which do you prefer?
 ```
 
+## Jargon Pattern
+
+- First mention format: `plain phrase (term)`.
+- Default: name the official term and continue.
+- Expand only when learner asks or shows confusion.
 ## Depth Calibration
 
 - Beginner:
-  - detail steps 1-6,
-  - include step 7 when useful,
-  - usually skip step 8 unless asked,
+  - detail steps 1-7,
+  - include step 8 when useful,
+  - usually skip step 9 unless asked,
   - explain why each next option matters.
 - Some exposure:
   - brief steps 1-4,
-  - focus on steps 5-6,
+  - focus on steps 5-7,
   - moderate detail for next options.
 - Brushing up:
   - minimal steps 1-4,
-  - emphasize changes/pitfalls in 5-6,
+  - emphasize changes/pitfalls in 5-7,
   - concise next options.
 
 ## Concepts Without Clear History

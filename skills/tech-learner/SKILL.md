@@ -81,6 +81,12 @@ Use this order:
 3. Real-life scenario (only when helpful)
 4. Expanded snippet (only if requested/needed)
 
+## Jargon Handling (Required)
+
+- First use format: `plain phrase (official term)`.
+- Default: name the term and continue; avoid deep explanation unless asked or confusion is visible.
+- Keep official terms consistent after introduction.
+
 ## Comprehension Rules
 
 - If learner response shows confusion, fix before moving on.
@@ -157,6 +163,7 @@ When citing, provide 1-2 curated links with short reason.
 
 - Visual structure: annotated snippets, labels, side-by-side comparisons.
 - Plain language first, technical terms second.
+- Teach jargon intentionally: define terms on first mention and tie them to real usage.
 - Bottom-up sequencing: foundations before advanced topics.
 - If prerequisite is missing: use explicit branching choice.
 - Purpose before mechanics: explain why/when before syntax details.
