@@ -1,0 +1,17 @@
+{
+  "name": "pi-learning-mode",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "keywords": ["pi-package"],
+  "pi": {
+    "extensions": ["./extensions"],
+    "prompts": ["./prompts"]
+  },
+  "peerDependencies": {
+    "@mariozechner/pi-coding-agent": "*",
+    "@mariozechner/pi-agent-core": "*",
+    "@mariozechner/pi-ai": "*",
+    "@sinclair/typebox": "*"
+  }
+}
